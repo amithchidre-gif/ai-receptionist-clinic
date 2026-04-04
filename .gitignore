@@ -1,0 +1,27 @@
+node_modules/
+dist/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Google service account keys
+google-calendar-sa.json
+google-calendar-sa.json.json
+
+# Temp audio files
+/tmp/
+backend/tmp/
+
+# Token files
+backend/token.txt
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db

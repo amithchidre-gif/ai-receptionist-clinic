@@ -1,0 +1,10 @@
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+require('dotenv').config();
+const { Pool } = require('pg');
+const p = new Pool({ connectionString: process.env.DATABASE_URL });
+const r1 = await p.query("SELECT clinic_id, telnyx_phone_number FROM clinic_settings WHERE clinic_id = '78de52b5-3895-4824-b970-2676eb668293'");
+console.log('settings:', JSON.stringify(r1.rows));
+const r2 = await p.query("SELECT call_control_id, status FROM call_logs WHERE call_control_id = 'test-call-1'");
+console.log('call_logs:', JSON.stringify(r2.rows));
+await p.end();

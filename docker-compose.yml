@@ -1,0 +1,99 @@
+﻿services:
+  postgres:
+    image: postgres:15
+    container_name: clinic-postgres
+    environment:
+      POSTGRES_DB: ai_receptionist
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_INITDB_ARGS: "--auth-host=md5 --auth-local=trust"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ai_receptionist"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: clinic-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: clinic-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+
+      # Database — points to the postgres service inside Docker network
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ai_receptionist
+
+      # Redis
+      REDIS_URL: redis://redis:6379
+
+      # Auth
+      JWT_SECRET: 2db93f8f02ee2b821a6b7516304f87191a892955bcc2167bdee2f531104e9d00
+
+      # OpenRouter LLM (gpt-4o-mini via OpenRouter)
+      OPENROUTER_API_KEY: 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
+      OPENROUTER_MODEL: openai/gpt-4o-mini
+
+      # Deepgram (Speech-to-Text)
+      DEEPGRAM_API_KEY: 5392be4d98921642de6b917f1538312082a3fae4
+
+      # Inworld (TTS)
+      INWORLD_API_KEY: cTJqVWFrQzVtQ1ZDRjB2eU9hYWRzRGRwRlVPQk5aaEU6SWxEZVc1OTROVEJpRDVvWWEzQWtFQjRYZ0U2akR3UnIwaXRCUHNvOHhYSXJDNXJ3U29TeDA2NWRmNjRzcE00OA==
+      INWORLD_VOICE_ID: Ashley
+
+      # Telnyx (Voice + SMS)
+      TELNYX_API_KEY: KEY019CF915BC168D1E1A4EBF209CC8E2AD_4Clg7e3lrlm8vvcjD3lkLv
+      TELNYX_PUBLIC_KEY: 19AyMl6ahi+S2vnAJDreuVg9DHMj51WVOzsQgMhR35A
+      TELNYX_PHONE_NUMBER: "+19257097010"
+      TELNYX_APP_ID: "2924471882994419034"
+
+      # Google Calendar service account (file is baked into the image)
+      GOOGLE_APPLICATION_CREDENTIALS: /app/google-calendar-sa.json
+
+      # Public base URL — ngrok tunnels Telnyx webhooks here
+      BASE_URL: https://unlight-lawfully-nevada.ngrok-free.dev
+
+      # Frontend URL (used in CORS + form link SMS)
+      FRONTEND_URL: http://localhost:3000
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:4000
+    container_name: clinic-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
