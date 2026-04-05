@@ -18,6 +18,9 @@ backend/tmp/
 # Token files
 backend/token.txt
 
+# Local helper scripts with embedded secrets
+set-render-env-vars.ps1
+
 # Logs
 *.log
 npm-debug.log*
