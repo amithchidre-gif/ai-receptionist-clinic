@@ -3,6 +3,8 @@ dotenv.config();
 
 console.log(`[server.ts] process.cwd(): ${process.cwd()}`);
 
+import { createServer } from 'http';
+import { WebSocketServer } from 'ws';
 import express, { Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
@@ -68,6 +70,7 @@ import dashboardRoutes from './routes/dashboard';
 import settingsRoutes from './routes/settings';
 import voiceRoutes from './routes/voice';
 import audioRoutes from './routes/audio';
+import { handleTelnyxAudioStream } from './routes/wsStream';
 import { startReminderScheduler } from './services/reminderScheduler';
 
 app.use('/api/auth', authRoutes);
@@ -113,8 +116,31 @@ app.get('/form/:token', handleFormTokenRequest);
 // Error handler (must be last)
 app.use(errorHandler);
 
+// ─── HTTP + WebSocket server ─────────────────────────────────────────────────
+// We need a raw http.Server so we can attach the WebSocket server for Telnyx
+// audio streaming (wss://<BASE_URL>/voice/stream).
+const httpServer = createServer(app);
+
+// WebSocket server: only handles /voice/stream — all other WS upgrades are rejected.
+const wss = new WebSocketServer({ noServer: true });
+
+httpServer.on('upgrade', (request, socket, head) => {
+  try {
+    const { pathname } = new URL(request.url ?? '/', `http://${request.headers.host}`);
+    if (pathname === '/voice/stream') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        handleTelnyxAudioStream(ws, request);
+      });
+    } else {
+      socket.destroy();
+    }
+  } catch {
+    socket.destroy();
+  }
+});
+
 // Start server
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   console.log(JSON.stringify({
     level: 'info',
     message: 'AI Receptionist backend running',
