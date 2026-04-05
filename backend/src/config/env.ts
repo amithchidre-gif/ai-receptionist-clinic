@@ -9,6 +9,7 @@ console.log(`[env.ts] .env path: ${envPath}`);
 console.log(`[env.ts] .env exists: ${envExists}`);
 
 console.log(`[env.ts] DATABASE_URL before dotenv: ${process.env.DATABASE_URL ?? '(not set)'}`);
+console.log(`[env.ts] JWT_SECRET before dotenv: ${process.env.JWT_SECRET ? '(set, length=' + process.env.JWT_SECRET.length + ')' : '(not set)'}`);
 
 const dotenvResult = dotenv.config({ path: envPath, override: true });
 
