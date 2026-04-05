@@ -39,13 +39,15 @@ async function telnyxCallAction(callControlId: string, action: string, params: R
  * to be configured in the Telnyx portal — something that blocks transcription events entirely.
  */
 async function startGather(callControlId: string): Promise<void> {
+  // NOTE: Telnyx gather timeouts are in MILLISECONDS, not seconds.
+  // speech_timeout: max duration of speech input before gather completes
+  // no_speech_timeout: how long to wait for speech to begin before timing out
   await telnyxCallAction(callControlId, 'gather', {
     input: ['speech'],
-    speech_timeout: 10,        // seconds of continuous speech max
-    no_speech_timeout: 10,     // seconds before giving up if caller is silent
+    speech_timeout: 15000,      // 15 seconds max speech duration (ms)
+    no_speech_timeout: 30000,   // 30 seconds to wait for caller to start speaking (ms)
     speech_language: 'en-US',
-    speech_model: 'enhanced',  // best quality for natural-language input
-    stop_audio_on_dtmf: true,  // let DTMF interrupt playback too
+    speech_model: 'default',    // 'default' is the most reliable model; 'enhanced' caused no transcription
   });
 }
 
@@ -259,7 +261,8 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
       if (gatherStatus === 'call_hangup') return;
 
       // No speech detected — optionally prompt once, then hang up after repeated silence
-      if (gatherStatus === 'no_input' || !gatherTranscript.trim()) {
+      // Telnyx uses status 'timeout' when no_speech_timeout expires with no input
+      if (gatherStatus === 'no_input' || gatherStatus === 'timeout' || !gatherTranscript.trim()) {
         const count = (noInputCounts.get(callControlId) ?? 0) + 1;
         noInputCounts.set(callControlId, count);
 
