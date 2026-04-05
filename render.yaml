@@ -9,35 +9,34 @@ services:
       - key: NODE_ENV
         value: production
       - key: PORT
-        value: 4000
+        value: 10000
       - key: DATABASE_URL
-        sync: false
-      - key: REDIS_URL
-        sync: false
+        value: postgresql://ai_receptionist_db_sg3x_user:PkNfrheWKK3MQTx2QtTYOcFEQWmUOzON@dpg-d78s7q75r7bs73fcvli0-a/ai_receptionist_db_sg3x
       - key: JWT_SECRET
-        sync: false
+        value: 2db93f8f02ee2b821a6b7516304f87191a892955bcc2167bdee2f531104e9d00
+      - key: TELNYX_API_KEY
+        value: KEY019CF915BC168D1E1A4EBF209CC8E2AD_4Clg7e3lrlm8vvcjD3lkLv
+      - key: TELNYX_PUBLIC_KEY
+        value: 19AyMl6ahi+S2vnAJDreuVg9DHMj51WVOzsQgMhR35A
+      - key: TELNYX_PHONE_NUMBER
+        value: "+19257097010"
+      - key: TELNYX_APP_ID
+        value: "2924471882994419034"
+      - key: DEEPGRAM_API_KEY
+        value: 5392be4d98921642de6b917f1538312082a3fae4
       - key: OPENROUTER_API_KEY
-        sync: false
+        value: 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
       - key: OPENROUTER_MODEL
         value: openai/gpt-4o-mini
-      - key: DEEPGRAM_API_KEY
-        sync: false
       - key: INWORLD_API_KEY
-        sync: false
+        value: cTJqVWFrQzVtQ1ZDRjB2eU9hYWRzRGRwRlVPQk5aaEU6SWxEZVc1OTROVEJpRDVvWWEzQWtFQjRYZ0U2akR3UnIwaXRCUHNvOHhYSXJDNXJ3U29TeDA2NWRmNjRzcE00OA==
       - key: INWORLD_VOICE_ID
         value: Ashley
-      - key: TELNYX_API_KEY
-        sync: false
-      - key: TELNYX_PUBLIC_KEY
-        sync: false
-      - key: TELNYX_PHONE_NUMBER
-        sync: false
-      - key: TELNYX_APP_ID
-        sync: false
       - key: BASE_URL
-        sync: false
+        value: https://ai-receptionist-backend-4kvc.onrender.com
       - key: FRONTEND_URL
+        value: https://ai-receptionist-backend-4kvc.onrender.com
+      - key: REDIS_URL
         sync: false
-      # Google Calendar: paste the full service-account JSON content here
       - key: GOOGLE_CREDENTIALS_JSON
         sync: false
