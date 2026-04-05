@@ -2,6 +2,9 @@
  * streamingManager.ts
  *
  * Manages per-call Deepgram live (real-time) STT connections.
+ * Uses the `ws` package directly to connect to Deepgram's raw WebSocket API —
+ * bypassing the @deepgram/sdk live client which fails to upgrade in some Node.js
+ * environments on Render ("Received network error or non-101 status code.").
  *
  * Flow:
  *   1. voiceController sends `streaming_start` to Telnyx
@@ -12,12 +15,14 @@
  *   6. voiceController's callback runs the conversation pipeline and plays TTS
  */
 
-import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
+import WebSocket from 'ws';
 
 const LOG = 'streamingManager';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const deepgramConnections = new Map<string, any>();
+// Deepgram live transcription WebSocket endpoint
+const DEEPGRAM_WS_URL = 'wss://api.deepgram.com/v1/listen';
+
+const deepgramConnections = new Map<string, WebSocket>();
 
 type TranscriptCallback = (transcript: string, confidence: number) => void;
 const transcriptCallbacks = new Map<string, TranscriptCallback>();
@@ -34,7 +39,7 @@ export function registerTranscriptCallback(
 }
 
 /**
- * Start Deepgram live STT for a call.
+ * Start Deepgram live STT for a call using raw WebSocket (ws package).
  * Called from the WebSocket handler when Telnyx sends the 'start' event.
  * Audio format from Telnyx: G711 mulaw, 8000 Hz, mono.
  */
@@ -52,31 +57,33 @@ export function initDeepgramSession(callControlId: string): void {
 
   // Clean up any pre-existing connection for this call
   const existing = deepgramConnections.get(callControlId);
-  if (existing) {
-    try { existing.finish(); } catch { /* ignore */ }
+  if (existing && existing.readyState < WebSocket.CLOSING) {
+    try { existing.close(); } catch { /* ignore */ }
     deepgramConnections.delete(callControlId);
   }
 
-  const deepgram = createClient(apiKey);
-
-  const conn = deepgram.listen.live({
+  // Build Deepgram WebSocket URL with query parameters
+  // Telnyx streams G711 mulaw at 8000 Hz mono to us, so we forward it as-is.
+  const params = new URLSearchParams({
     model: 'nova-2',
     language: 'en-US',
-    // Audio coming from Telnyx is raw G711 mulaw, 8 kHz, mono
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    encoding: 'mulaw' as any,
-    sample_rate: 8000,
-    channels: 1,
-    // Only fire on complete utterances (no partials to avoid extra pipeline calls)
-    interim_results: false,
-    // End-of-speech detection: fire final transcript after 500ms of silence
-    endpointing: 500,
-    // Extra buffer — wait up to 1 extra second for the utterance to really be done
-    utterance_end_ms: 1000,
-    smart_format: true,
+    encoding: 'mulaw',        // G.711 μ-law (the format Telnyx sends)
+    sample_rate: '8000',
+    channels: '1',
+    interim_results: 'false', // Only fire on complete utterances
+    endpointing: '500',       // Fire final transcript after 500ms of silence
+    smart_format: 'true',
   });
 
-  conn.on(LiveTranscriptionEvents.Open, () => {
+  const url = `${DEEPGRAM_WS_URL}?${params.toString()}`;
+
+  const ws = new WebSocket(url, {
+    headers: {
+      Authorization: `Token ${apiKey}`,
+    },
+  });
+
+  ws.on('open', () => {
     console.info(JSON.stringify({
       level: 'info',
       service: LOG,
@@ -85,52 +92,66 @@ export function initDeepgramSession(callControlId: string): void {
     }));
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  conn.on(LiveTranscriptionEvents.Transcript, (data: any) => {
-    if (!data?.is_final) return;
+  ws.on('message', (rawData: Buffer) => {
+    try {
+      const msg = JSON.parse(rawData.toString()) as Record<string, unknown>;
 
-    const transcript: string = data?.channel?.alternatives?.[0]?.transcript ?? '';
-    const confidence: number = data?.channel?.alternatives?.[0]?.confidence ?? 0;
+      // Only handle transcript messages (type === 'Results')
+      const msgType = msg.type as string | undefined;
+      if (msgType !== 'Results') return;
 
-    if (!transcript.trim()) return;
+      const isFinal = msg.is_final as boolean | undefined;
+      if (!isFinal) return;
 
-    // PHI — never log the actual text
-    console.info(JSON.stringify({
-      level: 'info',
-      service: LOG,
-      message: 'Final transcript from Deepgram',
-      callControlId,
-      charCount: transcript.length,
-      confidence,
-    }));
+      const channel = (msg.channel as Record<string, unknown> | undefined);
+      const alternatives = channel?.alternatives as Array<Record<string, unknown>> | undefined;
+      const transcript = (alternatives?.[0]?.transcript as string | undefined) ?? '';
+      const confidence = (alternatives?.[0]?.confidence as number | undefined) ?? 0;
 
-    const cb = transcriptCallbacks.get(callControlId);
-    if (cb) {
-      cb(transcript, confidence);
+      if (!transcript.trim()) return;
+
+      // PHI — never log the actual text
+      console.info(JSON.stringify({
+        level: 'info',
+        service: LOG,
+        message: 'Final transcript from Deepgram',
+        callControlId,
+        charCount: transcript.length,
+        confidence,
+      }));
+
+      const cb = transcriptCallbacks.get(callControlId);
+      if (cb) {
+        cb(transcript, confidence);
+      }
+    } catch {
+      // Ignore malformed messages
     }
   });
 
-  conn.on(LiveTranscriptionEvents.Error, (err: unknown) => {
+  ws.on('error', (err: Error) => {
     console.error(JSON.stringify({
       level: 'error',
       service: LOG,
-      message: 'Deepgram live STT error',
+      message: 'Deepgram WebSocket error',
       callControlId,
-      error: (err as Error)?.message ?? String(err),
+      error: err.message,
     }));
   });
 
-  conn.on(LiveTranscriptionEvents.Close, () => {
+  ws.on('close', (code: number, reason: Buffer) => {
     console.info(JSON.stringify({
       level: 'info',
       service: LOG,
-      message: 'Deepgram live STT closed',
+      message: 'Deepgram WebSocket closed',
       callControlId,
+      code,
+      reason: reason.toString(),
     }));
     deepgramConnections.delete(callControlId);
   });
 
-  deepgramConnections.set(callControlId, conn);
+  deepgramConnections.set(callControlId, ws);
 }
 
 /**
@@ -138,10 +159,10 @@ export function initDeepgramSession(callControlId: string): void {
  * Called for every audio chunk received from Telnyx.
  */
 export function sendAudioToDeepgram(callControlId: string, audioBuffer: Buffer): void {
-  const conn = deepgramConnections.get(callControlId);
-  if (!conn) return;
+  const ws = deepgramConnections.get(callControlId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
   try {
-    conn.send(audioBuffer);
+    ws.send(audioBuffer);
   } catch {
     // Connection may have already closed
   }
@@ -149,12 +170,18 @@ export function sendAudioToDeepgram(callControlId: string, audioBuffer: Buffer):
 
 /**
  * Cleanly close the Deepgram connection and remove the transcript callback for this call.
- * Called on call.hangup or call.streaming.ended.
+ * Called on call.hangup or streaming.stopped.
  */
 export function closeDeepgramSession(callControlId: string): void {
-  const conn = deepgramConnections.get(callControlId);
-  if (conn) {
-    try { conn.finish(); } catch { /* ignore */ }
+  const ws = deepgramConnections.get(callControlId);
+  if (ws) {
+    try {
+      // Send CloseStream message to flush remaining audio before closing
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'CloseStream' }));
+      }
+      ws.close();
+    } catch { /* ignore */ }
     deepgramConnections.delete(callControlId);
   }
   transcriptCallbacks.delete(callControlId);

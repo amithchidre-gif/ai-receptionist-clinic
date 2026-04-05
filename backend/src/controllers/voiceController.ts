@@ -620,19 +620,19 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
         callControlId,
       }));
 
-    } else if (eventType === 'call.streaming.started') {
+    } else if (eventType === 'call.streaming.started' || eventType === 'streaming.started') {
       console.info(JSON.stringify({
         level: 'info',
         service: 'telnyxWebhook',
-        message: 'call.streaming.started — Telnyx forwarding caller audio to /voice/stream',
+        message: 'streaming.started — Telnyx forwarding caller audio to /voice/stream',
         callControlId,
       }));
 
-    } else if (eventType === 'call.streaming.ended') {
+    } else if (eventType === 'call.streaming.ended' || eventType === 'streaming.stopped') {
       console.info(JSON.stringify({
         level: 'info',
         service: 'telnyxWebhook',
-        message: 'call.streaming.ended',
+        message: 'streaming.stopped',
         callControlId,
       }));
       closeDeepgramSession(callControlId);
