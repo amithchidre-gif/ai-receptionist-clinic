@@ -8,12 +8,11 @@ import { getClinicIdByPhoneNumber } from '../models/settingsModel';
 import { sendSuccess, sendError } from '../middleware/responseHelpers';
 
 // Per-call state tracking (module-level, in-memory)
-// playingCalls: callControlIds currently playing AI audio (used for barge-in)
-// processingCalls: callControlIds with a pipeline turn already in-flight (prevents double-processing)
-// lastProcessedAt: timestamp of last completed pipeline turn per call (500ms cooldown)
 const playingCalls = new Set<string>();
 const processingCalls = new Set<string>();
 const lastProcessedAt = new Map<string, number>();
+// Track consecutive no-input gather events per call (to avoid infinite silence loops)
+const noInputCounts = new Map<string, number>();
 
 /**
  * Call a Telnyx Call Control action directly via REST API.
@@ -31,6 +30,23 @@ async function telnyxCallAction(callControlId: string, action: string, params: R
       timeout: 8000,
     }
   );
+}
+
+/**
+ * Start a speech gather on the live call.
+ * Telnyx's own ASR transcribes the caller's next utterance and fires call.gather.ended.
+ * This replaces Engine-A (Google STT) transcription which requires Google credentials
+ * to be configured in the Telnyx portal — something that blocks transcription events entirely.
+ */
+async function startGather(callControlId: string): Promise<void> {
+  await telnyxCallAction(callControlId, 'gather', {
+    input: ['speech'],
+    speech_timeout: 10,        // seconds of continuous speech max
+    no_speech_timeout: 10,     // seconds before giving up if caller is silent
+    speech_language: 'en-US',
+    speech_model: 'enhanced',  // best quality for natural-language input
+    stop_audio_on_dtmf: true,  // let DTMF interrupt playback too
+  });
 }
 
 /**
@@ -171,44 +187,12 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
         return;
       }
 
-      // Start real-time transcription (Engine A = Google STT, supports streaming interim_results).
-      // Engine B (Telnyx/Whisper) does NOT support streaming — it only transcribes complete utterances
-      // and has no `interim_results` support, so it would never fire call.transcription events.
-      // transcription_engine_config is required to pass engine-specific params.
-      // model: 'phone_call' + use_enhanced: true is optimised for telephony audio quality.
-      try {
-        await telnyxCallAction(callControlId, 'transcription_start', {
-          transcription_engine: 'A',
-          transcription_tracks: 'inbound',
-          transcription_engine_config: {
-            transcription_engine: 'A',
-            language: 'en',
-            interim_results: true,
-            enable_speaker_diarization: false,
-            min_speaker_count: 1,
-            max_speaker_count: 1,
-            profanity_filter: false,
-            use_enhanced: true,
-            model: 'phone_call',
-            hints: [],
-          },
-        });
-        console.info(JSON.stringify({
-          level: 'info',
-          service: 'telnyxWebhook',
-          message: 'call.answered: transcription started',
-          clinicId: callLog.clinicId,
-          callControlId,
-        }));
-      } catch (transcribeErr) {
-        console.error(JSON.stringify({
-          level: 'error',
-          service: 'telnyxWebhook',
-          message: 'Failed to start transcription',
-          callControlId,
-          error: (transcribeErr as Error).message,
-        }));
-      }
+      // NOTE: transcription_start with Engine A (Google STT) requires Google credentials
+      // configured inside the Telnyx portal — not set up, so no call.transcription events ever fire.
+      // Instead we use gather (Telnyx's built-in ASR) which fires call.gather.ended with the
+      // full transcript after the caller finishes speaking. No external credentials required.
+      // Gather is sent after call.playback.ended so we don't attempt to capture speech while
+      // the AI is still playing its response.
 
       const input: PipelineTurnInput = {
         sessionId: callControlId,
@@ -234,7 +218,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
           console.info(JSON.stringify({
             level: 'info',
             service: 'telnyxWebhook',
-            message: 'call.answered: audio playing',
+            message: 'call.answered: greeting audio playing — gather will start after playback ends',
             clinicId: callLog.clinicId,
             callControlId,
             audioSize: result.ttsResult.audioBuffer.length,
@@ -247,10 +231,136 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
             callControlId,
             error: (playErr as Error).message,
           }));
+          // TTS failed — start gather immediately so call doesn't go silent
+          try { await startGather(callControlId); } catch { /* ignore */ }
         }
+      } else {
+        // No TTS audio — start gather immediately
+        try { await startGather(callControlId); } catch { /* ignore */ }
+      }
+
+    } else if (eventType === 'call.gather.ended') {
+      // Telnyx has collected the caller's utterance via built-in ASR.
+      const gatherStatus: string = payload.status ?? '';
+      const gatherTranscript: string = payload.speech?.results?.[0]?.transcript ?? '';
+      const gatherConfidence: number = payload.speech?.results?.[0]?.confidence ?? 0;
+
+      console.info(JSON.stringify({
+        level: 'info',
+        service: 'telnyxWebhook',
+        message: 'call.gather.ended',
+        callControlId,
+        status: gatherStatus,
+        hasTranscript: !!gatherTranscript,
+        confidence: gatherConfidence,
+      }));
+
+      // Caller hung up during gather
+      if (gatherStatus === 'call_hangup') return;
+
+      // No speech detected — optionally prompt once, then hang up after repeated silence
+      if (gatherStatus === 'no_input' || !gatherTranscript.trim()) {
+        const count = (noInputCounts.get(callControlId) ?? 0) + 1;
+        noInputCounts.set(callControlId, count);
+
+        if (count >= 3) {
+          // Three consecutive silences — caller is likely gone
+          const callLog = await getCallLogByControlId(callControlId);
+          if (callLog) {
+            const silenceResult = await runPipelineTurn({
+              sessionId: callControlId,
+              clinicId: callLog.clinicId,
+              callLogId: callLog.id,
+              transcriptFragment: '',
+            });
+            if (silenceResult.ttsResult?.audioBuffer) {
+              await playAudioToCall(callControlId, silenceResult.ttsResult.audioBuffer);
+            }
+          }
+          setTimeout(async () => {
+            try { await telnyxCallAction(callControlId, 'hangup'); } catch { /* already hung up */ }
+          }, 3000);
+        } else {
+          // Re-send gather to give caller another chance
+          try { await startGather(callControlId); } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      // Reset no-input counter on a real transcript
+      noInputCounts.set(callControlId, 0);
+
+      // Guard: skip if pipeline is already in-flight for this call
+      if (processingCalls.has(callControlId)) return;
+
+      const gatherCallLog = await getCallLogByControlId(callControlId);
+      if (!gatherCallLog) {
+        console.warn(JSON.stringify({
+          level: 'warn',
+          service: 'telnyxWebhook',
+          message: 'call.gather.ended: no call log found',
+          callControlId,
+        }));
+        return;
+      }
+
+      processingCalls.add(callControlId);
+      try {
+        const gatherInput: PipelineTurnInput = {
+          sessionId: callControlId,
+          clinicId: gatherCallLog.clinicId,
+          callLogId: gatherCallLog.id,
+          transcriptFragment: gatherTranscript,
+        };
+
+        const gatherResult = await runPipelineTurn(gatherInput);
+
+        console.info(JSON.stringify({
+          level: 'info',
+          service: 'telnyxWebhook',
+          message: 'call.gather.ended: pipeline turn complete',
+          clinicId: gatherCallLog.clinicId,
+          callControlId,
+          state: gatherResult.state,
+          nextState: gatherResult.nextState,
+          callCompletedThisTurn: gatherResult.callCompletedThisTurn,
+        }));
+
+        if (gatherResult.ttsResult?.audioBuffer) {
+          await playAudioToCall(callControlId, gatherResult.ttsResult.audioBuffer);
+          // Next gather is sent from call.playback.ended after AI audio finishes
+          if (gatherResult.shouldAutoHangUp) {
+            setTimeout(async () => {
+              try { await telnyxCallAction(callControlId, 'hangup'); } catch { /* already hung up */ }
+            }, 3500);
+          }
+        } else {
+          // No audio response — send gather immediately
+          if (!gatherResult.shouldAutoHangUp) {
+            try { await startGather(callControlId); } catch { /* ignore */ }
+          } else {
+            setTimeout(async () => {
+              try { await telnyxCallAction(callControlId, 'hangup'); } catch { /* already hung up */ }
+            }, 1000);
+          }
+        }
+      } finally {
+        processingCalls.delete(callControlId);
+        lastProcessedAt.set(callControlId, Date.now());
       }
 
     } else if (eventType === 'call.transcription') {
+      // DISABLED: Engine A transcription is no longer used (requires Google credentials in Telnyx portal).
+      // All speech input now goes through call.gather.ended events (gather action with built-in ASR).
+      console.info(JSON.stringify({
+        level: 'info',
+        service: 'telnyxWebhook',
+        message: 'call.transcription: ignored (gather-based flow is active)',
+        callControlId,
+      }));
+      return;
+
+    } else if (eventType === '_call.transcription.DISABLED') {
       const transcript: string = payload.transcription_data?.transcript ?? '';
       const isFinal: boolean = payload.transcription_data?.is_final ?? false;
 
@@ -393,30 +503,23 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
       console.info(JSON.stringify({
         level: 'info',
         service: 'telnyxWebhook',
-        message: 'call.playback.ended — ensuring transcription active',
+        message: 'call.playback.ended — starting gather for caller speech',
         callControlId,
       }));
-      // Safety net: ensure transcription is still running after AI audio finishes.
-      // If transcription_start was already called, Telnyx silently ignores a duplicate.
-      try {
-        await telnyxCallAction(callControlId, 'transcription_start', {
-          transcription_engine: 'A',
-          transcription_tracks: 'inbound',
-          transcription_engine_config: {
-            transcription_engine: 'A',
-            language: 'en',
-            interim_results: true,
-            enable_speaker_diarization: false,
-            min_speaker_count: 1,
-            max_speaker_count: 1,
-            profanity_filter: false,
-            use_enhanced: true,
-            model: 'phone_call',
-            hints: [],
-          },
-        });
-      } catch {
-        // Expected if transcription is already running — not an error
+      // After AI audio finishes, start gathering the caller's next utterance.
+      // This is the primary trigger for the gather loop.
+      if (!processingCalls.has(callControlId)) {
+        try {
+          await startGather(callControlId);
+        } catch (gatherErr) {
+          console.error(JSON.stringify({
+            level: 'error',
+            service: 'telnyxWebhook',
+            message: 'Failed to start gather after playback',
+            callControlId,
+            error: (gatherErr as Error).message,
+          }));
+        }
       }
 
     } else if (eventType === 'call.hangup') {
@@ -436,6 +539,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
           await updateCallLogLatency(hangupLog.id, hangupLog.clinicId, avgLatencyMs, session.turnCount);
         }
       }
+      noInputCounts.delete(callControlId);
       clearSession(callControlId);
 
       console.info(JSON.stringify({
