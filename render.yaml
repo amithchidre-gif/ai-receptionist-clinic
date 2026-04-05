@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: ai-receptionist-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm ci && npm run build && mkdir -p dist/migrations && cp src/migrations/*.sql dist/migrations/ && mkdir -p dist/scripts
+    startCommand: node dist/scripts/runMigrations.js && node dist/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: openai/gpt-4o-mini
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: INWORLD_API_KEY
+        sync: false
+      - key: INWORLD_VOICE_ID
+        value: Ashley
+      - key: TELNYX_API_KEY
+        sync: false
+      - key: TELNYX_PUBLIC_KEY
+        sync: false
+      - key: TELNYX_PHONE_NUMBER
+        sync: false
+      - key: TELNYX_APP_ID
+        sync: false
+      - key: BASE_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        sync: false
