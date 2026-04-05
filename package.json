@@ -1,0 +1,9 @@
+{
+  "name": "ai-receptionist-clinic",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "cd backend && npm ci && npm run build && mkdir -p dist/migrations && cp src/migrations/*.sql dist/migrations/",
+    "start": "cd backend && node dist/scripts/runMigrations.js && node dist/server.js"
+  }
+}
