@@ -12,13 +12,12 @@ console.log(`[env.ts] DATABASE_URL before dotenv: ${process.env.DATABASE_URL ?? 
 
 const dotenvResult = dotenv.config({ path: envPath, override: true });
 
-if (dotenvResult.error) {
+if (dotenvResult.error && envExists) {
+  // Only log error if the file exists but failed to parse
   console.error(`[env.ts] dotenv parse ERROR: ${dotenvResult.error.message}`);
-} else {
+} else if (!dotenvResult.error) {
   const parsed = dotenvResult.parsed ?? {};
   console.log(`[env.ts] dotenv parsed ${Object.keys(parsed).length} keys: ${Object.keys(parsed).join(', ')}`);
-  const maskedParsed = (parsed.DATABASE_URL ?? '(not in file)').replace(/:\/\/([^:]+):([^@]+)@/, '://$1:***@');
-  console.log(`[env.ts] dotenv file DATABASE_URL: ${maskedParsed}`);
 }
 
 const rawDbUrl = process.env.DATABASE_URL ?? '(not set)';
