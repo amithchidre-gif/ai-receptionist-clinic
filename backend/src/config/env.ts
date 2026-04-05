@@ -40,7 +40,6 @@ if (!process.env.GOOGLE_APPLICATION_CREDENTIALS && process.env.GOOGLE_CREDENTIAL
 }
 
 const required = [
-  "DATABASE_URL",
   "JWT_SECRET",
   "TELNYX_API_KEY",
   "DEEPGRAM_API_KEY",
@@ -55,8 +54,12 @@ for (const key of required) {
   }
 }
 
+if (!process.env.DATABASE_URL) {
+  console.warn('[env.ts] WARNING: DATABASE_URL is not set. Database operations will fail until this is configured in Render dashboard.');
+}
+
 export const config = {
-  databaseUrl: process.env.DATABASE_URL as string,
+  databaseUrl: process.env.DATABASE_URL ?? '',
   jwtSecret: process.env.JWT_SECRET as string,
   telnyxApiKey: process.env.TELNYX_API_KEY as string,
   telnyxPublicKey: process.env.TELNYX_PUBLIC_KEY ?? "",

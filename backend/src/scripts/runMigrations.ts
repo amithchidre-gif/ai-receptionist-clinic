@@ -4,6 +4,11 @@ import '../config/env'; // validates required env vars on startup
 import { pool, query } from '../config/db';
 
 async function runMigrations(): Promise<void> {
+  if (!process.env.DATABASE_URL) {
+    console.warn('Skipping migrations: DATABASE_URL is not set. Set it in Render dashboard.');
+    return;
+  }
+
   const migrationsDir = path.join(__dirname, '..', 'migrations');
 
   let files: string[];

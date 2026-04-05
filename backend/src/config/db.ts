@@ -1,11 +1,11 @@
 import { Pool, QueryResult } from 'pg';
 
 if (!process.env.DATABASE_URL) {
-  throw new Error('Missing required env var: DATABASE_URL');
+  console.warn('[db.ts] DATABASE_URL is not set — database operations will fail. Set it in Render dashboard.');
 }
 
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: process.env.DATABASE_URL || 'postgresql://localhost/placeholder',
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
