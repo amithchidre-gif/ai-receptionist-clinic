@@ -103,6 +103,79 @@ const VALID_INTENTS: IntentType[] = [
   'book_appointment', 'cancel_appointment', 'reschedule_appointment', 'clinic_question', 'unknown',
 ];
 
+// ---------------------------------------------------------------------------
+// Keyword-based extraction fallback (runs when LLM is unavailable)
+// ---------------------------------------------------------------------------
+
+function keywordExtract(transcript: string): LLMExtracted {
+  const t = transcript.toLowerCase();
+  const result: LLMExtracted = { ...LLM_EXTRACTED_DEFAULT };
+
+  // Intent detection
+  const hasCancel = /\bcancel\b/.test(t);
+  const hasReschedule = /\b(reschedule|change|move|modify)\b/.test(t) && /\bappointment\b/.test(t);
+  const hasBook = /\b(book|schedule|appointment|make an appointment|need an appointment|set up|set an)\b/.test(t);
+
+  if (hasCancel && !hasReschedule) {
+    result.intent = 'cancel_appointment';
+  } else if (hasReschedule) {
+    result.intent = 'reschedule_appointment';
+  } else if (hasBook) {
+    result.intent = 'book_appointment';
+  } else if (/\b(hours|location|address|cost|price|insurance|question|info|information|directions)\b/.test(t)) {
+    result.intent = 'clinic_question';
+  }
+
+  // Yes / No / Goodbye
+  result.isYes = /\b(yes|yeah|yep|yup|correct|right|sure|absolutely|that's right|indeed|confirmed)\b/.test(t);
+  result.isNo = /\b(no|nope|nah|wrong|incorrect|not right|that's wrong)\b/.test(t);
+  result.isGoodbye = /\b(goodbye|bye|thank you|thanks|that's all|that's it|all set|nothing else|no thanks|we're done|i'm done)\b/.test(t);
+
+  // Name: "my name is X Y", "I am X Y", "I'm X", "this is X Y"
+  const nameMatch = transcript.match(
+    /(?:my name is|i am|i'm|this is|name's)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
+  );
+  if (nameMatch) {
+    result.name = nameMatch[1]
+      .trim()
+      .split(/\s+/)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(' ');
+  }
+
+  // Phone: 10 consecutive digits
+  const phoneDigits = transcript.replace(/[-.()\s]/g, '');
+  const phoneMatch = phoneDigits.match(/\b(\d{10})\b/);
+  if (phoneMatch) result.phone = phoneMatch[1];
+
+  // DOB: "March 30 1985", "March 30th, 1985", "30 March 1985"
+  const MONTHS: Record<string, string> = {
+    january: '01', february: '02', march: '03', april: '04', may: '05', june: '06',
+    july: '07', august: '08', september: '09', october: '10', november: '11', december: '12',
+  };
+  const dobMonthFirst = transcript.match(
+    /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/i
+  );
+  const dobDayFirst = transcript.match(
+    /\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(January|February|March|April|May|June|July|August|September|October|November|December),?\s+(\d{4})\b/i
+  );
+  const dobSlash = transcript.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/);
+
+  if (dobMonthFirst) {
+    const m = MONTHS[dobMonthFirst[1].toLowerCase()];
+    const d = String(parseInt(dobMonthFirst[2], 10)).padStart(2, '0');
+    result.dateOfBirth = `${m}/${d}/${dobMonthFirst[3]}`;
+  } else if (dobDayFirst) {
+    const m = MONTHS[dobDayFirst[2].toLowerCase()];
+    const d = String(parseInt(dobDayFirst[1], 10)).padStart(2, '0');
+    result.dateOfBirth = `${m}/${d}/${dobDayFirst[3]}`;
+  } else if (dobSlash) {
+    result.dateOfBirth = normalizeDOB(`${dobSlash[1]}/${dobSlash[2]}/${dobSlash[3]}`);
+  }
+
+  return result;
+}
+
 /**
  * Normalize a dateOfBirth string to MM/DD/YYYY.
  * Handles: ISO (YYYY-MM-DD), MM/DD/YYYY, and DD/MM/YYYY (when first number > 12).
@@ -140,8 +213,8 @@ async function extractWithLLM(
 
   const apiKey = config.openrouterApiKey;
   if (!apiKey) {
-    console.error(JSON.stringify({ level: 'error', service: 'conversationManager', message: 'OPENROUTER_API_KEY not set', sessionId, clinicId }));
-    return { ...LLM_EXTRACTED_DEFAULT };
+    console.error(JSON.stringify({ level: 'error', service: 'conversationManager', message: 'OPENROUTER_API_KEY not set — using keyword fallback', sessionId, clinicId }));
+    return keywordExtract(transcript);
   }
 
   const today = new Date().toISOString().slice(0, 10);
@@ -220,13 +293,13 @@ Always return ALL fields. Use null for missing strings, false for missing boolea
     console.warn(JSON.stringify({
       level: 'warn',
       service: 'conversationManager',
-      message: 'LLM extraction failed — using defaults',
+      message: 'LLM extraction failed — using keyword fallback',
       sessionId,
       clinicId,
       error: errMsg,
       httpStatus: errStatus,
     }));
-    return { ...LLM_EXTRACTED_DEFAULT };
+    return keywordExtract(transcript);
   }
 }
 
