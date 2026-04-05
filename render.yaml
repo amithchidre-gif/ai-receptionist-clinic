@@ -38,5 +38,6 @@ services:
         sync: false
       - key: FRONTEND_URL
         sync: false
-      - key: GOOGLE_APPLICATION_CREDENTIALS
+      # Google Calendar: paste the full service-account JSON content here
+      - key: GOOGLE_CREDENTIALS_JSON
         sync: false

@@ -26,6 +26,19 @@ const maskedDbUrl = rawDbUrl.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:***@');
 console.log(`[env.ts] DATABASE_URL: ${maskedDbUrl}`);
 console.log(`[env.ts] INWORLD_API_KEY set: ${!!process.env.INWORLD_API_KEY}`);
 
+// Support Google credentials stored as JSON string in env (for Render/cloud deployments)
+// Set GOOGLE_CREDENTIALS_JSON to the full JSON content of the service account file
+if (!process.env.GOOGLE_APPLICATION_CREDENTIALS && process.env.GOOGLE_CREDENTIALS_JSON) {
+  const credPath = path.join('/tmp', 'google-credentials.json');
+  try {
+    fs.writeFileSync(credPath, process.env.GOOGLE_CREDENTIALS_JSON, 'utf8');
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = credPath;
+    console.log(`[env.ts] Google credentials written to ${credPath}`);
+  } catch (e) {
+    console.warn(`[env.ts] Failed to write Google credentials: ${(e as Error).message}`);
+  }
+}
+
 const required = [
   "DATABASE_URL",
   "JWT_SECRET",
@@ -33,7 +46,6 @@ const required = [
   "DEEPGRAM_API_KEY",
   "INWORLD_API_KEY",
   "OPENROUTER_API_KEY",
-  "GOOGLE_APPLICATION_CREDENTIALS",
   "FRONTEND_URL",
 ] as const;
 
