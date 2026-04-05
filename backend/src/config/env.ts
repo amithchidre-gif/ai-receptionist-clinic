@@ -39,18 +39,20 @@ if (!process.env.GOOGLE_APPLICATION_CREDENTIALS && process.env.GOOGLE_CREDENTIAL
   }
 }
 
-const required = [
+// Warn about missing vars but don't crash — service will start and log warnings
+const recommended = [
+  "DATABASE_URL",
   "JWT_SECRET",
   "TELNYX_API_KEY",
   "DEEPGRAM_API_KEY",
   "INWORLD_API_KEY",
   "OPENROUTER_API_KEY",
   "FRONTEND_URL",
-] as const;
+];
 
-for (const key of required) {
+for (const key of recommended) {
   if (!process.env[key]) {
-    throw new Error(`Missing required env var: ${key}`);
+    console.warn(`[env.ts] WARNING: ${key} is not set. Related features will not work.`);
   }
 }
 
@@ -60,18 +62,18 @@ if (!process.env.DATABASE_URL) {
 
 export const config = {
   databaseUrl: process.env.DATABASE_URL ?? '',
-  jwtSecret: process.env.JWT_SECRET as string,
-  telnyxApiKey: process.env.TELNYX_API_KEY as string,
-  telnyxPublicKey: process.env.TELNYX_PUBLIC_KEY ?? "",
-  deepgramApiKey: process.env.DEEPGRAM_API_KEY as string,
-  inworldApiKey: process.env.INWORLD_API_KEY as string,
+  jwtSecret: process.env.JWT_SECRET ?? 'changeme-set-in-render-dashboard',
+  telnyxApiKey: process.env.TELNYX_API_KEY ?? '',
+  telnyxPublicKey: process.env.TELNYX_PUBLIC_KEY ?? '',
+  deepgramApiKey: process.env.DEEPGRAM_API_KEY ?? '',
+  inworldApiKey: process.env.INWORLD_API_KEY ?? '',
   inworldVoiceId: process.env.INWORLD_VOICE_ID ?? 'Ashley',
-  openrouterApiKey: process.env.OPENROUTER_API_KEY as string,
-  openrouterModel: process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini",
-  googleApplicationCredentials: process.env.GOOGLE_APPLICATION_CREDENTIALS as string,
-  frontendUrl: process.env.FRONTEND_URL as string,
-  baseUrl: process.env.BASE_URL ?? "http://localhost:4000",
-  port: parseInt(process.env.PORT ?? "4000", 10),
-  redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
-  nodeEnv: process.env.NODE_ENV ?? "development",
+  openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
+  openrouterModel: process.env.OPENROUTER_MODEL ?? 'openai/gpt-4o-mini',
+  googleApplicationCredentials: process.env.GOOGLE_APPLICATION_CREDENTIALS ?? '',
+  frontendUrl: process.env.FRONTEND_URL ?? 'http://localhost:3000',
+  baseUrl: process.env.BASE_URL ?? 'http://localhost:4000',
+  port: parseInt(process.env.PORT ?? '4000', 10),
+  redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
+  nodeEnv: process.env.NODE_ENV ?? 'development',
 };
