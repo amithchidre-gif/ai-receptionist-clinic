@@ -11,7 +11,7 @@ console.log(`[env.ts] .env exists: ${envExists}`);
 console.log(`[env.ts] DATABASE_URL before dotenv: ${process.env.DATABASE_URL ?? '(not set)'}`);
 console.log(`[env.ts] JWT_SECRET before dotenv: ${process.env.JWT_SECRET ? '(set, length=' + process.env.JWT_SECRET.length + ')' : '(not set)'}`);
 
-const dotenvResult = dotenv.config({ path: envPath, override: true });
+const dotenvResult = dotenv.config({ path: envPath, override: false });
 
 if (dotenvResult.error && envExists) {
   // Only log error if the file exists but failed to parse
