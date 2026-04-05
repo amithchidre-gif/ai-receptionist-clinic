@@ -39,15 +39,17 @@ async function telnyxCallAction(callControlId: string, action: string, params: R
  * to be configured in the Telnyx portal — something that blocks transcription events entirely.
  */
 async function startGather(callControlId: string): Promise<void> {
-  // NOTE: Telnyx gather timeouts are in MILLISECONDS, not seconds.
-  // speech_timeout: max duration of speech input before gather completes
-  // no_speech_timeout: how long to wait for speech to begin before timing out
+  // IMPORTANT: Telnyx gather timeouts are in SECONDS (integer), NOT milliseconds.
+  // Verified: setting 30000 (seconds = 8 hours) causes Telnyx to silently ignore
+  // the value and fall back to the 5-second default — causing every gather to time out.
+  // speech_timeout: max seconds of speech before gather auto-completes (max 60)
+  // no_speech_timeout: seconds to wait for speech to START before timing out (max 30)
   await telnyxCallAction(callControlId, 'gather', {
     input: ['speech'],
-    speech_timeout: 15000,      // 15 seconds max speech duration (ms)
-    no_speech_timeout: 30000,   // 30 seconds to wait for caller to start speaking (ms)
+    speech_timeout: 60,         // 60 seconds max speech duration (seconds)
+    no_speech_timeout: 30,      // 30 seconds to wait for caller to start speaking (seconds)
     speech_language: 'en-US',
-    speech_model: 'default',    // 'default' is the most reliable model; 'enhanced' caused no transcription
+    speech_model: 'default',    // 'default' is the most reliable; 'enhanced' caused no transcription
   });
 }
 

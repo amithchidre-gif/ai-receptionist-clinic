@@ -213,14 +213,18 @@ Always return ALL fields. Use null for missing strings, false for missing boolea
       isYes: parsed.isYes === true,
       isNo: parsed.isNo === true,
     };
-  } catch {
-    // Never log transcript — PHI. Log only that extraction failed.
+  } catch (llmErr: unknown) {
+    // Never log transcript — PHI. Log the error type/message only.
+    const errMsg = llmErr instanceof Error ? llmErr.message : String(llmErr);
+    const errStatus = (llmErr as { status?: number })?.status ?? null;
     console.warn(JSON.stringify({
       level: 'warn',
       service: 'conversationManager',
       message: 'LLM extraction failed — using defaults',
       sessionId,
       clinicId,
+      error: errMsg,
+      httpStatus: errStatus,
     }));
     return { ...LLM_EXTRACTED_DEFAULT };
   }
