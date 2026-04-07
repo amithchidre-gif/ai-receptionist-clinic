@@ -25,7 +25,7 @@ services:
       - key: DEEPGRAM_API_KEY
         value: 5392be4d98921642de6b917f1538312082a3fae4
       - key: OPENROUTER_API_KEY
-        value: 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
+        value: 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
       - key: OPENROUTER_MODEL
         value: openai/gpt-4o-mini
       - key: INWORLD_API_KEY
