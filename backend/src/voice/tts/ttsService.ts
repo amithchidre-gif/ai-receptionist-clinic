@@ -17,11 +17,33 @@ interface SynthesizeParams {
 //   {"result":{"audio":"<base64_mp3>"},"error":null}
 const INWORLD_TTS_URL = 'https://api.inworld.ai/tts/v1/voice:stream';
 
+// ---------------------------------------------------------------------------
+// TTS response cache — avoids re-synthesising identical static phrases.
+// Only caches short phrases (< 200 chars) that don't contain caller-specific data.
+// Saves ~1-2s per cached call.
+// ---------------------------------------------------------------------------
+const TTS_CACHE = new Map<string, Buffer>();
+const TTS_CACHE_MAX = 60;
+
+function ttsCacheKey(text: string, voiceId: string): string {
+  return `${voiceId}::${text.trim()}`;
+}
+
 export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
   const { text, sessionId, clinicId } = params;
 
   const apiKey = config.inworldApiKey;
   const voiceId = config.inworldVoiceId;
+
+  // Return cached audio for short static phrases (no caller-specific data)
+  if (text.length < 200) {
+    const cacheKey = ttsCacheKey(text, voiceId);
+    const cached = TTS_CACHE.get(cacheKey);
+    if (cached) {
+      console.log(JSON.stringify({ level: 'debug', service: 'ttsService', message: 'TTS cache hit', textLength: text.length, sessionId }));
+      return { audioBuffer: cached, text, durationMs: 0 };
+    }
+  }
 
   if (!apiKey) {
     console.error(JSON.stringify({
@@ -116,6 +138,16 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
 
     const audioBuffer = Buffer.concat(audioChunks);
     const durationMs = Date.now() - start;
+
+    // Cache short static phrases for future calls
+    if (audioBuffer.byteLength > 0 && text.length < 200) {
+      const cacheKey = ttsCacheKey(text, voiceId);
+      if (TTS_CACHE.size >= TTS_CACHE_MAX) {
+        // Evict oldest entry
+        TTS_CACHE.delete(TTS_CACHE.keys().next().value as string);
+      }
+      TTS_CACHE.set(cacheKey, audioBuffer);
+    }
 
     // Never log the text — PHI risk
     console.log(JSON.stringify({

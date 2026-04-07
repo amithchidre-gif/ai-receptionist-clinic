@@ -48,7 +48,8 @@ export interface ConversationSession {
   bookingConfirmed: boolean;
   lastAppointmentId: string | null;
   latencies: number[];            // per-turn totalMs — in-memory only, for avg at hangup
-  nameConfirmed: boolean;         // true once the spelled-back name has been confirmed
+  nameConfirmed: boolean;         // true once last name spelling confirmed
+  firstNameConfirmed: boolean;    // true once first name spelling confirmed
   createdAt: Date;
   updatedAt: Date;
 }
@@ -204,6 +205,15 @@ function normalizeDOB(raw: string): string | null {
   return null;
 }
 
+// Module-level singleton — avoids re-instantiation on every LLM call (~50ms saved)
+let _openaiClient: OpenAI | null = null;
+function getOpenAIClient(apiKey: string): OpenAI {
+  if (!_openaiClient) {
+    _openaiClient = new OpenAI({ apiKey, baseURL: 'https://api.openai.com/v1' });
+  }
+  return _openaiClient;
+}
+
 async function extractWithLLM(
   transcript: string,
   sessionId: string,
@@ -237,10 +247,7 @@ Fields to extract:
 Always return ALL fields. Use null for missing strings, false for missing booleans.
 {"intent":null,"name":null,"phone":null,"dateOfBirth":null,"bookingDate":null,"bookingTime":null,"isGoodbye":false,"isYes":false,"isNo":false}`;
 
-  const openai = new OpenAI({
-    apiKey,
-    baseURL: 'https://api.openai.com/v1',
-  });
+  const openai = getOpenAIClient(apiKey);
 
   try {
     const response = await openai.chat.completions.create(
@@ -343,6 +350,7 @@ function getOrCreateSession(
     lastAppointmentId: null,
     latencies: [],
     nameConfirmed: false,
+    firstNameConfirmed: false,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -352,18 +360,36 @@ function getOrCreateSession(
 }
 
 // ---------------------------------------------------------------------------
-// Name spell-back helper (still used for TTS confirmation)
+// Phonetic alphabet spelling helpers
 // ---------------------------------------------------------------------------
 
+const PHONETIC_ALPHABET: Record<string, string> = {
+  A: 'Alpha', B: 'Bravo', C: 'Charlie', D: 'Delta', E: 'Echo',
+  F: 'Foxtrot', G: 'Golf', H: 'Hotel', I: 'India', J: 'Juliet',
+  K: 'Kilo', L: 'Lima', M: 'Mike', N: 'November', O: 'Oscar',
+  P: 'Papa', Q: 'Quebec', R: 'Romeo', S: 'Sierra', T: 'Tango',
+  U: 'Uniform', V: 'Victor', W: 'Whiskey', X: 'X-ray', Y: 'Yankee', Z: 'Zulu',
+};
+
 /**
- * Spell a name back letter-by-letter for TTS confirmation.
- * "Sarah Johnson" → "S - A - R - A - H — J - O - H - N - S - O - N"
+ * Spell a single word using NATO phonetic alphabet.
+ * "Amit" → "A as in Alpha, M as in Mike, I as in India, T as in Tango"
+ */
+export function spellPhonetic(word: string): string {
+  return word
+    .toUpperCase()
+    .split('')
+    .filter((c) => /[A-Z]/.test(c))
+    .map((c) => `${c} as in ${PHONETIC_ALPHABET[c] ?? c}`)
+    .join(', ');
+}
+
+/**
+ * Spell a full name using NATO phonetic alphabet (kept for backward compat).
+ * "Sarah" → "S as in Sierra, A as in Alpha, R as in Romeo, A as in Alpha, H as in Hotel"
  */
 export function spellName(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  return parts
-    .map((word) => word.toUpperCase().split('').join(' - '))
-    .join(', \u2014 ');
+  return name.trim().split(/\s+/).map(spellPhonetic).join('; ');
 }
 
 
@@ -423,6 +449,7 @@ async function saveSessionToDB(session: ConversationSession): Promise<void> {
       bookingConfirmed: session.bookingConfirmed,
       lastAppointmentId: session.lastAppointmentId,
       nameConfirmed: session.nameConfirmed,
+      firstNameConfirmed: session.firstNameConfirmed,
     });
 
     await query(
@@ -549,15 +576,17 @@ async function processState(
     // ----- IDENTITY VERIFICATION -----
     case 'identity_verification': {
       // ----------------------------------------------------------------
-      // Step 1: collect name
+      // Step 1: collect name — nothing stored yet
       // ----------------------------------------------------------------
       if (!session.collectedData.name) {
         const name = extracted.name;
         if (name) {
           session.collectedData.name = name;
+          session.firstNameConfirmed = false;
           session.nameConfirmed = false;
+          const firstName = name.trim().split(/\s+/)[0];
           return {
-            responseText: `Thank you. Let me confirm — your name is ${spellName(name)}. Is that correct?`,
+            responseText: `Got it. Did I hear your first name correctly? That's ${firstName} — ${spellPhonetic(firstName)}. Is that right?`,
             nextState: 'identity_verification',
             shouldAutoHangUp: false,
           };
@@ -578,9 +607,95 @@ async function processState(
       }
 
       // ----------------------------------------------------------------
-      // Step 2: confirm the spelled-back name
+      // Step 2: confirm first name phonetically
+      // ----------------------------------------------------------------
+      if (!session.firstNameConfirmed) {
+        const nameWords = session.collectedData.name.trim().split(/\s+/);
+        const firstName = nameWords[0];
+
+        if (extracted.isYes) {
+          session.firstNameConfirmed = true;
+          if (nameWords.length > 1) {
+            // Already have last name — confirm it now
+            const lastName = nameWords.slice(1).join(' ');
+            return {
+              responseText: `And your last name is ${lastName} — ${spellPhonetic(lastName)}. Is that right?`,
+              nextState: 'identity_verification',
+              shouldAutoHangUp: false,
+            };
+          }
+          // No last name yet — ask for it
+          return {
+            responseText: 'And your last name?',
+            nextState: 'identity_verification',
+            shouldAutoHangUp: false,
+          };
+        }
+
+        if (extracted.isNo) {
+          session.collectedData.name = undefined;
+          session.firstNameConfirmed = false;
+          session.nameConfirmed = false;
+          return {
+            responseText: 'I apologize — could you please tell me your first name?',
+            nextState: 'identity_verification',
+            shouldAutoHangUp: false,
+          };
+        }
+
+        // Caller re-stated name
+        if (extracted.name) {
+          session.collectedData.name = extracted.name;
+          session.firstNameConfirmed = false;
+          const newFirst = extracted.name.trim().split(/\s+/)[0];
+          return {
+            responseText: `Got it. Did I hear your first name correctly? That's ${newFirst} — ${spellPhonetic(newFirst)}. Is that right?`,
+            nextState: 'identity_verification',
+            shouldAutoHangUp: false,
+          };
+        }
+
+        return {
+          responseText: `Just to confirm — your first name is ${firstName}, that's ${spellPhonetic(firstName)}. Please say yes or no.`,
+          nextState: 'identity_verification',
+          shouldAutoHangUp: false,
+        };
+      }
+
+      // ----------------------------------------------------------------
+      // Step 3: confirm last name phonetically
       // ----------------------------------------------------------------
       if (!session.nameConfirmed) {
+        const nameWords = session.collectedData.name.trim().split(/\s+/);
+        const firstName = nameWords[0];
+        const hasLastName = nameWords.length > 1;
+
+        if (!hasLastName) {
+          // Still waiting to hear last name
+          const newName = extracted.name;
+          if (newName) {
+            const newWords = newName.trim().split(/\s+/);
+            const lastName = newWords.length > 1 ? newWords.slice(1).join(' ') : newWords[0];
+            session.collectedData.name = `${firstName} ${lastName}`;
+            return {
+              responseText: `${lastName} — ${spellPhonetic(lastName)}. Is that right?`,
+              nextState: 'identity_verification',
+              shouldAutoHangUp: false,
+            };
+          }
+          session.verificationAttempts++;
+          if (session.verificationAttempts >= 3) {
+            return { responseText: 'Let me connect you with a staff member. Please hold.', nextState: 'handoff', shouldAutoHangUp: false };
+          }
+          return {
+            responseText: 'Could you please tell me your last name?',
+            nextState: 'identity_verification',
+            shouldAutoHangUp: false,
+          };
+        }
+
+        const lastName = nameWords.slice(1).join(' ');
+
         if (extracted.isYes) {
           session.nameConfirmed = true;
           console.log(JSON.stringify({
@@ -598,35 +713,36 @@ async function processState(
         }
 
         if (extracted.isNo) {
-          session.collectedData.name = undefined;
-          session.nameConfirmed = false;
+          // Keep first name, clear last name
+          session.collectedData.name = firstName;
           return {
-            responseText: 'I apologize — could you please tell me your name again?',
+            responseText: 'I apologize — could you please tell me your last name?',
             nextState: 'identity_verification',
             shouldAutoHangUp: false,
           };
         }
 
-        // Caller may be re-stating their name directly
+        // Caller said last name again
         if (extracted.name) {
-          session.collectedData.name = extracted.name;
-          session.nameConfirmed = false;
+          const newWords = extracted.name.trim().split(/\s+/);
+          const newLastName = newWords.length > 1 ? newWords.slice(1).join(' ') : newWords[0];
+          session.collectedData.name = `${firstName} ${newLastName}`;
           return {
-            responseText: `Thank you. Let me confirm — your name is ${spellName(extracted.name)}. Is that correct?`,
+            responseText: `${newLastName} — ${spellPhonetic(newLastName)}. Is that right?`,
             nextState: 'identity_verification',
             shouldAutoHangUp: false,
           };
         }
 
         return {
-          responseText: `Just to confirm — your name is ${spellName(session.collectedData.name)}. Please say yes or no.`,
+          responseText: `Just to confirm — your last name is ${lastName}, that's ${spellPhonetic(lastName)}. Please say yes or no.`,
           nextState: 'identity_verification',
           shouldAutoHangUp: false,
         };
       }
 
       // ----------------------------------------------------------------
-      // Step 3: collect DOB
+      // Step 4: collect DOB
       // ----------------------------------------------------------------
       if (!session.collectedData.dateOfBirth) {
         const dob = extracted.dateOfBirth;
@@ -654,7 +770,7 @@ async function processState(
       }
 
       // ----------------------------------------------------------------
-      // Step 4: collect phone
+      // Step 5: collect phone
       // ----------------------------------------------------------------
       if (!session.collectedData.phone) {
         const rawPhone = extracted.phone; // 10 digits from LLM
