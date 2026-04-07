@@ -659,8 +659,19 @@ async function processState(
         const name = extracted.name;
         if (name) {
           session.collectedData.name = name;
-          // Accept the name immediately — no phonetic confirmation required.
-          // This saves 2–3 turns and prevents the confirmation loop.
+          // Detect if spelling was used: preprocessing changed the raw transcript
+          const wasSpelled = preprocessSpelledLetters(transcript).toLowerCase() !== transcript.toLowerCase();
+          if (wasSpelled) {
+            // Spelling detected — ask for simple yes/no confirmation of the resolved name
+            session.firstNameConfirmed = false;
+            session.nameConfirmed = false;
+            return {
+              responseText: `Did I get that right — your name is "${name}"? Please say yes or no.`,
+              nextState: 'identity_verification',
+              shouldAutoHangUp: false,
+            };
+          }
+          // Not spelled — accept immediately, go straight to DOB
           session.firstNameConfirmed = true;
           session.nameConfirmed = true;
           const firstName = name.trim().split(/\s+/)[0];
@@ -686,57 +697,70 @@ async function processState(
       }
 
       // ----------------------------------------------------------------
-      // Step 2: (skipped — phonetic first-name confirmation removed)
-      // firstNameConfirmed is set to true in step 1 above.
+      // Step 2: simple yes/no spelling confirmation (only reached when wasSpelled=true)
       // ----------------------------------------------------------------
       if (!session.firstNameConfirmed) {
-        const nameWords = session.collectedData.name.trim().split(/\s+/);
-        const firstName = nameWords[0];
+        const name = session.collectedData.name!;
 
         if (extracted.isYes) {
+          // Confirmed — accept and move to DOB
           session.firstNameConfirmed = true;
-          if (nameWords.length > 1) {
-            // Already have last name — confirm it now
-            const lastName = nameWords.slice(1).join(' ');
-            return {
-              responseText: `And your last name is ${lastName} — ${spellPhonetic(lastName)}. Is that right?`,
-              nextState: 'identity_verification',
-              shouldAutoHangUp: false,
-            };
-          }
-          // No last name yet — ask for it
+          session.nameConfirmed = true;
+          const firstName = name.trim().split(/\s+/)[0];
+          console.log(JSON.stringify({
+            level: 'info',
+            service: 'conversationManager',
+            event: 'name_confirmed',
+            sessionId: session.sessionId,
+            clinicId: session.clinicId,
+          }));
           return {
-            responseText: 'And your last name?',
+            responseText: `Got it, ${firstName}. And your date of birth?`,
             nextState: 'identity_verification',
             shouldAutoHangUp: false,
           };
         }
 
         if (extracted.isNo) {
+          // Rejected — clear and ask to spell again
           session.collectedData.name = undefined;
           session.firstNameConfirmed = false;
           session.nameConfirmed = false;
+          session.verificationAttempts++;
+          if (session.verificationAttempts >= 3) {
+            return { responseText: 'Let me connect you with a staff member. Please hold.', nextState: 'handoff', shouldAutoHangUp: false };
+          }
           return {
-            responseText: 'I apologize — could you please tell me your first name?',
+            responseText: 'I apologize — could you please spell your name again?',
             nextState: 'identity_verification',
             shouldAutoHangUp: false,
           };
         }
 
-        // Caller re-stated name
+        // Caller re-spelled or re-stated their name
         if (extracted.name) {
           session.collectedData.name = extracted.name;
-          session.firstNameConfirmed = false;
-          const newFirst = extracted.name.trim().split(/\s+/)[0];
+          const wasSpelled2 = preprocessSpelledLetters(transcript).toLowerCase() !== transcript.toLowerCase();
+          if (wasSpelled2) {
+            return {
+              responseText: `Did I get that right — your name is "${extracted.name}"? Please say yes or no.`,
+              nextState: 'identity_verification',
+              shouldAutoHangUp: false,
+            };
+          }
+          session.firstNameConfirmed = true;
+          session.nameConfirmed = true;
+          const firstName2 = extracted.name.trim().split(/\s+/)[0];
           return {
-            responseText: `Got it. Did I hear your first name correctly? That's ${newFirst} — ${spellPhonetic(newFirst)}. Is that right?`,
+            responseText: `Got it, ${firstName2}. And your date of birth?`,
             nextState: 'identity_verification',
             shouldAutoHangUp: false,
           };
         }
 
+        // Re-prompt: repeat exactly what we heard
         return {
-          responseText: `Just to confirm — your first name is ${firstName}, that's ${spellPhonetic(firstName)}. Please say yes or no.`,
+          responseText: `I heard "${name}". Is that correct? Please say yes or no.`,
           nextState: 'identity_verification',
           shouldAutoHangUp: false,
         };
@@ -829,7 +853,7 @@ async function processState(
         if (dob) {
           session.collectedData.dateOfBirth = dob;
           return {
-            responseText: 'Got it. And your phone number?',
+            responseText: 'Great. And your phone number?',
             nextState: 'identity_verification',
             shouldAutoHangUp: false,
           };
@@ -843,7 +867,7 @@ async function processState(
           };
         }
         return {
-          responseText: 'I need your date of birth. You can say it like "January 15, 1990" or "01/15/1990".',
+          responseText: 'I need your date of birth. For example, you can say "January 15, 1990" or "01/15/1990".',
           nextState: 'identity_verification',
           shouldAutoHangUp: false,
         };

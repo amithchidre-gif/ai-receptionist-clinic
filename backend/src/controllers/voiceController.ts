@@ -268,17 +268,29 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
       // ─── Register Deepgram transcript callback BEFORE starting the stream ────
       // This closure is called by streamingManager whenever Deepgram fires a final
       // transcript for this call. It runs the conversation pipeline and plays TTS.
-      registerTranscriptCallback(callControlId, async (transcript: string, confidence: number) => {
-        // Ignore transcript if the AI is currently speaking (no barge-in yet)
-        if (playingCalls.has(callControlId)) {
-          console.info(JSON.stringify({
-            level: 'info',
-            service: 'telnyxWebhook',
-            message: 'Transcript ignored — AI is playing audio',
-            callControlId,
-          }));
-          return;
+      registerTranscriptCallback(callControlId, async (transcript: string, confidence: number, isFinal: boolean) => {
+        // Barge-in: any speech (even interim) while AI is playing → stop playback immediately
+        if (transcript.trim() && playingCalls.has(callControlId)) {
+          playingCalls.delete(callControlId);
+          clearSilenceTimer(callControlId);
+          try {
+            await telnyxCallAction(callControlId, 'playback_stop');
+            console.info(JSON.stringify({
+              level: 'info',
+              service: 'telnyxWebhook',
+              message: 'Barge-in: stopped AI playback',
+              callControlId,
+              isFinal,
+            }));
+          } catch {
+            // Ignore — playback may have already ended
+          }
+          // For interim barge-in: stop speaking but wait for the final transcript to run the pipeline
+          if (!isFinal) return;
         }
+
+        // Only run the pipeline on final (complete) transcripts
+        if (!isFinal) return;
 
         // Prevent concurrent pipeline runs for the same call
         if (processingCalls.has(callControlId)) return;

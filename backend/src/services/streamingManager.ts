@@ -24,11 +24,12 @@ const DEEPGRAM_WS_URL = 'wss://api.deepgram.com/v1/listen';
 
 const deepgramConnections = new Map<string, WebSocket>();
 
-type TranscriptCallback = (transcript: string, confidence: number) => void;
+// isFinal=true → complete utterance, run pipeline; isFinal=false → interim, barge-in only
+type TranscriptCallback = (transcript: string, confidence: number, isFinal: boolean) => void;
 const transcriptCallbacks = new Map<string, TranscriptCallback>();
 
 /**
- * Register a callback for when Deepgram fires a final transcript.
+ * Register a callback for when Deepgram fires a transcript (interim or final).
  * Must be called BEFORE initDeepgramSession so no transcript is missed.
  */
 export function registerTranscriptCallback(
@@ -132,8 +133,7 @@ export function initDeepgramSession(callControlId: string): void {
 
       const cb = transcriptCallbacks.get(callControlId);
       if (cb) {
-        // For interim, pass confidence 0.5 (or actual if available)
-        cb(transcript, isFinal ? confidence : 0.5);
+        cb(transcript, isFinal ? confidence : 0.5, isFinal ?? false);
       }
     } catch {
       // Ignore malformed messages
