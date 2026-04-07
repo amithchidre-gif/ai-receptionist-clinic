@@ -48,7 +48,7 @@
       JWT_SECRET: 2db93f8f02ee2b821a6b7516304f87191a892955bcc2167bdee2f531104e9d00
 
       # OpenRouter LLM (gpt-4o-mini via OpenRouter)
-      OPENROUTER_API_KEY: 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
+      OPENROUTER_API_KEY: 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
       OPENROUTER_MODEL: openai/gpt-4o-mini
 
       # Deepgram (Speech-to-Text)
