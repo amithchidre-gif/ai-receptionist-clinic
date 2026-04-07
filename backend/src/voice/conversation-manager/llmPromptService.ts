@@ -43,6 +43,7 @@ export interface LLMCallContext {
   bookingTime: string | null;
   identityVerified: boolean;
   bookingConfirmed: boolean;
+  lastResponseOpener: string | null;
 }
 
 export interface LLMExtractedEntities {
@@ -64,16 +65,30 @@ export interface LLMTurnResult {
   /** The exact JSON string the model produced — stored in conversation history so the
    *  model always sees its prior responses in JSON format and continues in JSON. */
   raw_json: string;
+  /** Actual LLM streaming duration in ms — for telemetry. */
+  llmMs: number;
 }
 
 // ---------------------------------------------------------------------------
-// OpenAI singleton (avoids re-instantiation — ~50ms saved per cold start)
+// OpenAI-compatible client — uses Groq when GROQ_API_KEY set, else OpenAI
 // ---------------------------------------------------------------------------
 
 let _client: OpenAI | null = null;
-function getClient(apiKey: string): OpenAI {
-  if (!_client) _client = new OpenAI({ apiKey, baseURL: 'https://api.openai.com/v1' });
-  return _client;
+let _clientType: 'groq' | 'openai' | null = null;
+
+function getClient(): { client: OpenAI; model: string } {
+  const useGroq = !!config.groqApiKey;
+  const type = useGroq ? 'groq' : 'openai';
+  if (!_client || _clientType !== type) {
+    if (useGroq) {
+      _client = new OpenAI({ apiKey: config.groqApiKey, baseURL: 'https://api.groq.com/openai/v1' });
+    } else {
+      _client = new OpenAI({ apiKey: config.openrouterApiKey, baseURL: 'https://api.openai.com/v1' });
+    }
+    _clientType = type;
+  }
+  const model = useGroq ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini';
+  return { client: _client, model };
 }
 
 // ---------------------------------------------------------------------------
@@ -103,80 +118,69 @@ function normalizeDOB(raw: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// System prompt builder
+// Condensed system prompt — ~50% fewer tokens than v1 for faster TTFT.
+// response_text is placed FIRST in the output JSON so it appears earliest in
+// the stream, allowing TTS to start before the full JSON is received.
 // ---------------------------------------------------------------------------
 
 function buildSystemPrompt(ctx: LLMCallContext, clinicName: string, today: string): string {
   const cd = ctx.collectedData;
+  const collected = [
+    cd.name        ? `name:${cd.name}` : null,
+    cd.dateOfBirth ? `dob:${cd.dateOfBirth}` : null,
+    cd.phone       ? 'phone:✓' : null,
+    ctx.intent     ? `intent:${ctx.intent}` : null,
+    ctx.bookingDate ? `date:${ctx.bookingDate}` : null,
+    ctx.bookingTime ? `time:${ctx.bookingTime}` : null,
+  ].filter(Boolean).join(', ') || 'nothing yet';
 
-  const dataStatus = [
-    `  Name:              ${cd.name        ?? '(not yet collected)'}`,
-    `  Date of birth:     ${cd.dateOfBirth ?? '(not yet collected)'}`,
-    `  Phone:             ${cd.phone       ? '✓ collected' : '(not yet collected)'}`,
-    `  Intent:            ${ctx.intent     ?? '(not yet detected)'}`,
-    `  Booking date:      ${ctx.bookingDate ?? '(not yet collected)'}`,
-    `  Booking time:      ${ctx.bookingTime ?? '(not yet collected)'}`,
-    `  Identity verified: ${ctx.identityVerified ? 'YES' : 'NO'}`,
-    `  Booking confirmed: ${ctx.bookingConfirmed ? 'YES' : 'NO'}`,
-  ].join('\n');
+  const openerWarning = ctx.lastResponseOpener
+    ? `\nDo NOT start your response with "${ctx.lastResponseOpener}".`
+    : '';
 
-  return `You are the AI receptionist for ${clinicName}. Today is ${today}.
+  return `You are the AI voice receptionist for ${clinicName}. Today: ${today}.
+State: ${ctx.state} | Turn: ${ctx.turnCount + 1} | Attempts: ${ctx.verificationAttempts}
+Collected: ${collected}
+Identity verified: ${ctx.identityVerified ? 'YES' : 'NO'} | Booking confirmed: ${ctx.bookingConfirmed ? 'YES' : 'NO'}
 
-## CURRENT STATE
-State: ${ctx.state}  |  Turn: ${ctx.turnCount + 1}  |  Failed attempts: ${ctx.verificationAttempts}
+STATES: greeting→intent_detection→identity_verification→booking_flow→awaiting_time→completed | handoff
+RULES:
+- Stay in identity_verification until name+dob+phone ALL collected. Then: book/reschedule→booking_flow, cancel→completed.
+- booking_flow→awaiting_time once date known. awaiting_time→completed only on isYes.
+- handoff after 5+ failed attempts or caller asks for a person.
 
-## DATA COLLECTED SO FAR
-${dataStatus}
+EXTRACT from caller's words:
+- name: title-case; resolve spelled letters "a-m-i-t"→"Amit", NATO phonetics "Alpha Mike India Tango"→"Amit"
+- dateOfBirth: always "MM/DD/YYYY"; accept any format (e.g. "30 March 1985"→"03/30/1985")
+- phone: 10 US digits, strip leading 1, strip formatting (spoken digits ok)
+- bookingDate: "YYYY-MM-DD"; compute relative dates from today=${today}
+- bookingTime: "H:MM AM/PM"
+- isYes/isNo/isGoodbye: detect all natural variants
 
-## VALID CONVERSATION STATES
-- "intent_detection"      — Identifying reason for the call
-- "identity_verification" — Collecting name → DOB → phone (all 3 required)
-- "booking_flow"          — Collecting appointment date
-- "awaiting_time"         — Have date; collecting time or awaiting yes/no confirmation
-- "completed"             — Transaction complete; ask "Is there anything else?"
-- "handoff"               — Transfer to human staff
+STYLE: Warm, conversational, 1-2 sentences. Use caller's first name occasionally once known.
+Vary openers each turn: Got it / Perfect / Great / Sure / Thanks / Sounds good / Absolutely.${openerWarning}
+After collecting name, confirm spelling: 'So that is [Name] — is that right?'
+Never ask for already-collected info. Ask one question per turn.
 
-## STATE TRANSITION RULES
-1. Stay in "identity_verification" until name + dateOfBirth + phone are ALL collected.
-2. After all 3 are collected in "identity_verification", move to:
-   - "booking_flow" for book_appointment or reschedule_appointment intent
-   - "completed"    for cancel_appointment (cancellation is implicit)
-3. Move "booking_flow" → "awaiting_time" once bookingDate is known.
-4. Move "awaiting_time" → "completed" ONLY when isYes=true (caller confirmed appointment).
-5. Move to "handoff" after 4+ failed attempts, or if caller asks to speak to a person.
-6. From "completed", if caller has another request, assess intent and route accordingly.
+OUTPUT: valid JSON only, response_text FIRST:
+{"response_text":"Got it! And your date of birth?","next_state":"identity_verification","extracted_entities":{"intent":null,"name":"Amit Chidre","dateOfBirth":null,"phone":null,"bookingDate":null,"bookingTime":null,"isYes":false,"isNo":false,"isGoodbye":false}}`;
+}
 
-## EXTRACTION RULES
-- name:        Title-case every word. Resolve letter-by-letter spelling: "a m i t" / "A-M-I-T" / "A as in Alpha" → "Amit".
-- dateOfBirth: ALWAYS output "MM/DD/YYYY". Accept ALL input formats:
-                 "30 March 1985" → "03/30/1985"
-                 "March 30, 1985" → "03/30/1985"
-                 "March 30th 1985" → "03/30/1985"
-                 "30/3/1985" or "30/3/85" → "03/30/1985"
-                 "3/30/1985" → "03/30/1985"
-                 "1985-03-30" → "03/30/1985"
-- phone:       10 US digits only, no formatting. Strip leading "1".
-                 Spoken: "five five five one two three four five six seven" → "5551234567"
-                 "double five" → "55", "triple three" → "333"
-- bookingDate: "YYYY-MM-DD". Compute relative dates from today (${today}).
-                 "next Tuesday" → the upcoming Tuesday's ISO date
-                 "this Friday" → the coming Friday
-- bookingTime: "H:MM AM/PM". "ten" or "10am" → "10:00 AM". "two thirty" → "2:30 PM". "3pm" → "3:00 PM".
-- isYes:       yes / yeah / yep / correct / sure / absolutely / that's right / go ahead / confirmed
-- isNo:        no / nope / nah / wrong / incorrect / don't / never mind / actually / wait
-- isGoodbye:   goodbye / bye / thank you / that's all / all set / nothing else / I'm done / we're done
+// ---------------------------------------------------------------------------
+// Stream extractor — fires TTS as soon as response_text value is complete.
+// response_text MUST be the first field in the JSON for this to work.
+// ---------------------------------------------------------------------------
 
-## CONVERSATION STYLE
-- Warm, professional, concise — maximum 2 short sentences.
-- Use brief positive fillers BEFORE asking the next question: "Got it." / "Great." / "Perfect."
-- If the caller spelled their name letter-by-letter, ALWAYS confirm: 'Did I get that right — your name is "[name]"?'
-- NEVER ask for information already shown as collected above.
-- NEVER ask for more than one piece of information per turn.
-- If a caller provides multiple pieces of info in one message (e.g., name + DOB), extract both and ask for the next missing piece.
-
-## OUTPUT FORMAT
-Return ONLY this JSON — no markdown fences, no commentary, no extra fields:
-{"next_state":"identity_verification","response_text":"Got it. And your date of birth?","extracted_entities":{"intent":null,"name":"Amit Chidre","dateOfBirth":null,"phone":null,"bookingDate":null,"bookingTime":null,"isYes":false,"isNo":false,"isGoodbye":false}}`;
+function extractResponseTextFromStream(buffer: string): string | null {
+  // Matches: {"response_text":"<value>"  — value may contain escaped chars
+  const m = buffer.match(/^\s*\{\s*"response_text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (m) {
+    return m[1]
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, ' ')
+      .replace(/\\\\/g, '\\');
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -187,19 +191,24 @@ Return ONLY this JSON — no markdown fences, no commentary, no extra fields:
  * Make one LLM call that handles extraction + response + next-state in a
  * single JSON output.  Returns null if the LLM is unreachable or returns
  * unparseable JSON — the caller should fall back gracefully.
+ *
+ * @param onResponseTextReady - Optional callback fired the moment response_text
+ *   is complete in the stream. Used for parallel TTS: caller starts synthesis
+ *   DURING LLM streaming rather than waiting for the full JSON.
  */
 export async function callLLM(
   ctx: LLMCallContext,
   preprocessedTranscript: string,
   clinicName: string,
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
+  onResponseTextReady?: (text: string) => void,
 ): Promise<LLMTurnResult | null> {
-  const apiKey = config.openrouterApiKey;
+  const apiKey = config.groqApiKey || config.openrouterApiKey;
   if (!apiKey) {
     console.error(JSON.stringify({
       level: 'error',
       service: 'llmPromptService',
-      message: 'OPENAI_API_KEY not set',
+      message: 'No LLM API key set (GROQ_API_KEY or OPENAI_API_KEY)',
       sessionId: ctx.sessionId,
     }));
     return null;
@@ -207,35 +216,53 @@ export async function callLLM(
 
   const today = new Date().toISOString().slice(0, 10);
   const systemPrompt = buildSystemPrompt(ctx, clinicName, today);
+  const { client, model } = getClient();
+  const useGroq = model.startsWith('llama');
 
-  // Include last 3 turns (6 messages) for conversational memory
+  // Last 2 turns (4 messages) — shorter context = fewer input tokens → faster TTFT
   const messages: OpenAI.ChatCompletionMessageParam[] = [
     { role: 'system', content: systemPrompt },
-    ...history.slice(-6),
+    ...history.slice(-4),
     { role: 'user', content: preprocessedTranscript },
   ];
 
-  const client = getClient(apiKey);
-
+  const llmStart = Date.now();
   try {
     let content = '';
-    const stream = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
+    let responseTextFired = false;
+
+    const createParams: OpenAI.Chat.ChatCompletionCreateParamsStreaming = {
+      model,
       messages,
-      temperature: 0.0,
-      max_tokens: 200,
-      stream: true,
-    });
+      temperature: 0.3,
+      max_tokens: 120,
+      stream: true as const,
+      ...(useGroq ? { response_format: { type: 'json_object' as const } } : {}),
+    };
+
+    const stream = await client.chat.completions.create(createParams);
 
     for await (const chunk of stream) {
       const delta = chunk.choices?.[0]?.delta?.content;
-      if (delta) content += delta;
+      if (delta) {
+        content += delta;
+        // Fire TTS as soon as response_text value is complete in the stream
+        if (!responseTextFired && onResponseTextReady) {
+          const text = extractResponseTextFromStream(content);
+          if (text && text.trim().length > 0) {
+            responseTextFired = true;
+            onResponseTextReady(text.trim());
+          }
+        }
+      }
     }
+
+    const llmMs = Date.now() - llmStart;
 
     // Strip markdown code fences if the model adds them despite instructions
     content = content.trim().replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
 
-    const rawJson = content; // save before parsing — used for conversation history
+    const rawJson = content;
     const parsed = JSON.parse(content) as Record<string, unknown>;
     const e = (parsed.extracted_entities ?? {}) as Record<string, unknown>;
 
@@ -255,13 +282,24 @@ export async function callLLM(
       : null;
     const dateOfBirth = rawDob ? (normalizeDOB(rawDob) ?? rawDob) : null;
 
+    const responseText = typeof parsed.response_text === 'string' && parsed.response_text.trim()
+      ? parsed.response_text.trim()
+      : 'I apologize, could you say that again?';
+
+    console.info(JSON.stringify({
+      level: 'info',
+      service: 'llmPromptService',
+      provider: useGroq ? 'groq' : 'openai',
+      model,
+      llmMs,
+      sessionId: ctx.sessionId,
+    }));
+
     return {
       next_state: typeof parsed.next_state === 'string' && parsed.next_state.trim()
         ? parsed.next_state
         : ctx.state,
-      response_text: typeof parsed.response_text === 'string' && parsed.response_text.trim()
-        ? parsed.response_text.trim()
-        : 'I apologize, could you say that again?',
+      response_text: responseText,
       extracted_entities: {
         intent: typeof e.intent === 'string' && e.intent !== 'null' && e.intent.trim()
           ? e.intent.trim()
@@ -280,18 +318,19 @@ export async function callLLM(
         isGoodbye: e.isGoodbye === true,
       },
       raw_json: rawJson,
+      llmMs,
     };
   } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    const httpStatus = (err as Record<string, unknown>)?.status ?? null;
+    const llmMs = Date.now() - llmStart;
     console.warn(JSON.stringify({
       level: 'warn',
       service: 'llmPromptService',
       message: 'LLM call failed',
       sessionId: ctx.sessionId,
       clinicId: ctx.clinicId,
-      error: errMsg,
-      httpStatus,
+      error: err instanceof Error ? err.message : String(err),
+      httpStatus: (err as Record<string, unknown>)?.status ?? null,
+      llmMs,
     }));
     return null;
   }

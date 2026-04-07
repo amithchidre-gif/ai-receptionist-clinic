@@ -51,6 +51,7 @@ export interface ConversationSession {
   conversationHistory: Array<{role: 'user' | 'assistant'; content: string}>;  // last 3 turns for LLM context
   nameConfirmed: boolean;         // true once last name spelling confirmed
   firstNameConfirmed: boolean;    // true once first name spelling confirmed
+  lastResponseOpener: string | null; // first word of last AI turn (prevents opener repetition)
   createdAt: Date;
   updatedAt: Date;
 }
@@ -338,6 +339,7 @@ function getOrCreateSession(
     conversationHistory: [],
     nameConfirmed: false,
     firstNameConfirmed: false,
+    lastResponseOpener: null,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -492,15 +494,17 @@ async function updateCallLogStatus(
 async function processState(
   session: ConversationSession,
   transcript: string
-): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean }> {
-  // ─── Greeting (hardcoded — no user input to process yet) ─────────────────
+): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number }> {
+  // ─── Greeting (hardcoded — no user input to process yet) ──────────────────────
   if (session.state === 'greeting') {
     const clinicName = await getClinicName(session.clinicId);
-    return {
-      responseText: `Hello, thank you for calling ${clinicName}. How can I help you today?`,
-      nextState: 'intent_detection',
-      shouldAutoHangUp: false,
-    };
+    const greetings = [
+      `Thank you for calling ${clinicName}! How can I help you today?`,
+      `Hello, ${clinicName}! What can I help you with?`,
+      `Hi there! Thanks for calling ${clinicName}. How can I assist?`,
+    ];
+    const responseText = greetings[Math.floor(Math.random() * greetings.length)];
+    return { responseText, nextState: 'intent_detection', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0 };
   }
 
   // ─── All other states: single LLM call drives response + state + entities ─
@@ -519,9 +523,16 @@ async function processState(
     bookingTime: session.bookingTime,
     identityVerified: session.identityVerified,
     bookingConfirmed: session.bookingConfirmed,
+    lastResponseOpener: session.lastResponseOpener,
   };
 
-  const llmResult = await callLLM(ctx, preprocessed, clinicName, session.conversationHistory);
+  // Start TTS as soon as response_text is complete in the stream (parallel execution)
+  let ttsPromise: Promise<TtsResult | null> | null = null;
+  const onResponseTextReady = (text: string): void => {
+    ttsPromise = synthesize({ text, sessionId: session.sessionId, clinicId: session.clinicId }).catch(() => null);
+  };
+
+  const llmResult = await callLLM(ctx, preprocessed, clinicName, session.conversationHistory, onResponseTextReady);
 
   // LLM failure fallback — re-prompt without changing state
   if (!llmResult) {
@@ -535,6 +546,8 @@ async function processState(
       responseText: 'I apologize, I missed that. Could you say that again?',
       nextState: session.state,
       shouldAutoHangUp: false,
+      parallelTtsResult: null,
+      llmMs: 0,
     };
   }
 
@@ -607,6 +620,7 @@ async function processState(
       }));
       responseText = "I'm having trouble verifying your information. Let me connect you with a staff member.";
       nextState = 'handoff';
+      ttsPromise = null; // discard parallel TTS (wrong audio) — re-synthesize for error message
     }
   }
 
@@ -631,7 +645,7 @@ async function processState(
     if (session.conversationHistory.length > 6) {
       session.conversationHistory.splice(0, session.conversationHistory.length - 6);
     }
-    return { responseText: confirmResult.responseText, nextState: 'completed', shouldAutoHangUp: false };
+    return { responseText: confirmResult.responseText, nextState: 'completed', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: llmResult.llmMs };
   }
 
   // ── 4. Track failed attempts — escalate to handoff after 5 stuck turns ────
@@ -644,6 +658,8 @@ async function processState(
           responseText: 'Let me connect you with a staff member who can better assist you. Please hold.',
           nextState: 'handoff',
           shouldAutoHangUp: false,
+          parallelTtsResult: null,
+          llmMs: llmResult.llmMs,
         };
       }
     } else {
@@ -661,7 +677,15 @@ async function processState(
   }
 
   const shouldAutoHangUp = (e.isGoodbye || false) && (nextState === 'handoff' || nextState === 'completed');
-  return { responseText, nextState, shouldAutoHangUp };
+
+  // Await parallel TTS (started during LLM streaming — likely already done)
+  const parallelTtsResult: TtsResult | null = ttsPromise ? await ttsPromise : null;
+
+  // Track opener word so the LLM avoids repeating the same opener next turn
+  const firstWord = responseText.split(/\s+/)[0].replace(/[.,!?]/g, '').toLowerCase();
+  session.lastResponseOpener = firstWord || null;
+
+  return { responseText, nextState, shouldAutoHangUp, parallelTtsResult, llmMs: llmResult.llmMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -852,7 +876,7 @@ export async function runPipelineTurn(
 
   // 4. State machine
   const previousState = session.state;
-  const { responseText, nextState, shouldAutoHangUp } = await processState(session, transcript);
+  const { responseText, nextState, shouldAutoHangUp, parallelTtsResult, llmMs } = await processState(session, transcript);
   session.state = nextState;
 
   const t3 = Date.now(); // state machine + response build complete
@@ -878,9 +902,11 @@ export async function runPipelineTurn(
   // 7. Fire-and-forget DB save — don't wait for it, TTS is the bottleneck.
   saveSessionToDB(session).catch(() => undefined);
 
-  // 8. Await only TTS — this is the true latency gate.
-  let ttsResult: TtsResult | null = null;
-  ttsResult = await synthesize({ text: responseText, sessionId, clinicId }).catch(() => null);
+  // 8. TTS — use parallel result if available (started during LLM stream), else synthesize now
+  let ttsResult: TtsResult | null = parallelTtsResult;
+  if (!ttsResult) {
+    ttsResult = await synthesize({ text: responseText, sessionId, clinicId }).catch(() => null);
+  }
 
   const t4 = Date.now(); // TTS complete
 
@@ -891,8 +917,8 @@ export async function runPipelineTurn(
     sessionId,
     turn: session.turnCount,
     stt_ms: t1 - t0,
-    llm_ms: t2 - t1,
-    logic_ms: t3 - t2,
+    llm_ms: llmMs,
+    logic_ms: t3 - t2 - llmMs,
     tts_ms: t4 - t3,
     total_ms: t4 - t0,
     state: session.state,
