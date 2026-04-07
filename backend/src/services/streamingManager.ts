@@ -65,13 +65,14 @@ export function initDeepgramSession(callControlId: string): void {
   // Build Deepgram WebSocket URL with query parameters
   // Telnyx streams G711 mulaw at 8000 Hz mono to us, so we forward it as-is.
   const params = new URLSearchParams({
-    model: 'nova-2',
+    model: 'nova-2-phonecall',  // Optimised for telephony audio — faster + more accurate
     language: 'en-US',
-    encoding: 'mulaw',        // G.711 μ-law (the format Telnyx sends)
+    encoding: 'mulaw',           // G.711 μ-law (the format Telnyx sends)
     sample_rate: '8000',
     channels: '1',
-    interim_results: 'true', // Enable interim results for lower perceived latency
-    endpointing: '500',       // Fire final transcript after 500ms of silence
+    interim_results: 'true',     // Enable interim results for lower perceived latency
+    endpointing: '300',          // Reduced from 500ms → fires final transcript 200ms sooner
+    utterance_end_ms: '1000',    // Mark utterance complete after 1s of audio inactivity
     smart_format: 'true',
   });
 

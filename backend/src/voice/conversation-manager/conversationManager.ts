@@ -314,7 +314,7 @@ Always return ALL fields. Use null for missing strings, false for missing boolea
         { role: 'user', content: processedTranscript },
       ],
       temperature: 0.0,
-      max_tokens: 200,
+      max_tokens: 150,  // Reduced from 200 — JSON extraction output never exceeds 100 tokens
       stream: true,
     });
 

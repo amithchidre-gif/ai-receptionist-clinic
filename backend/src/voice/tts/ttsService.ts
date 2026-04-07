@@ -19,11 +19,10 @@ const INWORLD_TTS_URL = 'https://api.inworld.ai/tts/v1/voice:stream';
 
 // ---------------------------------------------------------------------------
 // TTS response cache — avoids re-synthesising identical static phrases.
-// Only caches short phrases (< 200 chars) that don't contain caller-specific data.
-// Saves ~1-2s per cached call.
+// Ceiling raised to 500 chars to cover longer dynamic-sounding but repeated phrases.
 // ---------------------------------------------------------------------------
 const TTS_CACHE = new Map<string, Buffer>();
-const TTS_CACHE_MAX = 80;
+const TTS_CACHE_MAX = 120;
 
 function ttsCacheKey(text: string, voiceId: string): string {
   return `${voiceId}::${text.trim()}`;
@@ -65,6 +64,16 @@ const WARMUP_PHRASES: string[] = [
   'Please say yes or no.',
   'Thank you. I have verified your identity. What date works for you?',
   'What date works for you? You can say something like "next Tuesday" or "April 9th".',
+  // Additional high-frequency phrases
+  'Thank you. I have verified your identity. What new date works for you?',
+  "Thank you. I have verified your identity. Your appointment has been cancelled. You will receive a confirmation text shortly. Is there anything else I can help you with?",
+  'Just to confirm — please say yes or no.',
+  'Got it.',
+  'Perfect.',
+  'Shall I confirm this appointment? Please say yes or no.',
+  'You will receive a confirmation text message shortly.',
+  'Could you repeat that please?',
+  'I did not catch that. Could you say that again?',
 ];
 
 /**
@@ -89,8 +98,8 @@ export async function warmTtsCache(): Promise<void> {
 
   console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS cache warm-up started', phraseCount: toWarm.length }));
 
-  // Process in batches of 3 to avoid overwhelming Inworld API
-  const BATCH = 3;
+  // Process in batches of 5 to pre-warm more phrases concurrently
+  const BATCH = 5;
   let warmed = 0;
   for (let i = 0; i < toWarm.length; i += BATCH) {
     const batch = toWarm.slice(i, i + BATCH);
@@ -114,8 +123,8 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
   const apiKey = config.inworldApiKey;
   const voiceId = config.inworldVoiceId;
 
-  // Return cached audio for short static phrases (no caller-specific data)
-  if (text.length < 200) {
+  // Return cached audio for phrases — raised ceiling to 500 chars to cover longer dynamic responses
+  if (text.length < 500) {
     const cacheKey = ttsCacheKey(text, voiceId);
     const cached = TTS_CACHE.get(cacheKey);
     if (cached) {
@@ -218,8 +227,8 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
     const audioBuffer = Buffer.concat(audioChunks);
     const durationMs = Date.now() - start;
 
-    // Cache short static phrases for future calls
-    if (audioBuffer.byteLength > 0 && text.length < 200) {
+    // Cache all synthesised audio (ceiling raised to 500 chars)
+    if (audioBuffer.byteLength > 0 && text.length < 500) {
       const cacheKey = ttsCacheKey(text, voiceId);
       if (TTS_CACHE.size >= TTS_CACHE_MAX) {
         // Evict oldest entry
