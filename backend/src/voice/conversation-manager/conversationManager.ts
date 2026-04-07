@@ -1,4 +1,4 @@
-import OpenAI from 'openai';
+import { callLLM, LLMCallContext } from './llmPromptService';
 import { query } from '../../config/db';
 import { config } from '../../config/env';
 import { detectEmergency, EMERGENCY_RESPONSE } from '../emergency/emergencyDetector';
@@ -48,6 +48,7 @@ export interface ConversationSession {
   bookingConfirmed: boolean;
   lastAppointmentId: string | null;
   latencies: number[];            // per-turn totalMs — in-memory only, for avg at hangup
+  conversationHistory: Array<{role: 'user' | 'assistant'; content: string}>;  // last 3 turns for LLM context
   nameConfirmed: boolean;         // true once last name spelling confirmed
   firstNameConfirmed: boolean;    // true once first name spelling confirmed
   createdAt: Date;
@@ -293,116 +294,7 @@ function normalizeDOB(raw: string): string | null {
   return null;
 }
 
-// Module-level singleton — avoids re-instantiation on every LLM call (~50ms saved)
-let _openaiClient: OpenAI | null = null;
-function getOpenAIClient(apiKey: string): OpenAI {
-  if (!_openaiClient) {
-    _openaiClient = new OpenAI({ apiKey, baseURL: 'https://api.openai.com/v1' });
-  }
-  return _openaiClient;
-}
-
-async function extractWithLLM(
-  transcript: string,
-  sessionId: string,
-  clinicId: string,
-): Promise<LLMExtracted> {
-  if (!transcript.trim()) return { ...LLM_EXTRACTED_DEFAULT };
-
-  // Resolve letter-by-letter spelling before LLM call — converts "A-M-I-T" → "Amit"
-  const processedTranscript = preprocessSpelledLetters(transcript);
-
-  const apiKey = config.openrouterApiKey;
-  if (!apiKey) {
-    console.error(JSON.stringify({ level: 'error', service: 'conversationManager', message: 'OPENAI_API_KEY not set — using keyword fallback', sessionId, clinicId }));
-    return keywordExtract(transcript);
-  }
-
-  const today = new Date().toISOString().slice(0, 10);
-
-  const systemPrompt = `You are an AI assistant that extracts structured data from a patient's spoken message to a medical clinic receptionist.
-
-Return ONLY valid JSON — no explanation, no markdown, no code blocks.
-
-Fields to extract:
-- intent: one of "book_appointment", "cancel_appointment", "reschedule_appointment", "clinic_question", "unknown", or null
-- name: full patient name as spoken (title-case each word), or null. If the caller spells out letters (e.g., "A-M-I-T", "A M I T", or phonetics like "A as in Alpha, M as in Mike"), reconstruct as the full word (e.g., "Amit")
-- phone: 10 US digits only (no spaces, dashes, parens), or null. Handle spoken forms: "triple 3" = "333", "double 5" = "55", "five five five one two three four five six seven" = "5551234567"
-- dateOfBirth: date of birth normalized to "MM/DD/YYYY". Handle ALL formats: "March 30, 1985"→"03/30/1985", "March 30th 1985"→"03/30/1985", "30 March 1985"→"03/30/1985", "30th of March 1985"→"03/30/1985", "3/30/85"→"03/30/1985", "03/30/1985"→"03/30/1985", "1985-03-30"→"03/30/1985". Return null only if completely absent.
-- bookingDate: desired appointment date as "YYYY-MM-DD" (compute from today ${today} if relative, e.g. "next Tuesday", "Thursday April 9th", "tomorrow"), or null
-- bookingTime: desired appointment time as "H:MM AM/PM" (e.g. "10:00 AM", "2:30 PM", "9:00 AM"), or null
-- isGoodbye: true if caller signals end-of-call (goodbye, bye, that's it, I'm done, we're done, no thanks, all set, I'm all set, nothing else, that's all)
-- isYes: true if caller confirms or agrees (yes, yeah, yep, correct, sure, go ahead, that's right, absolutely)
-- isNo: true if caller rejects or denies (no, nope, nah, wrong, don't, never mind)
-
-Always return ALL fields. Use null for missing strings, false for missing booleans.
-{"intent":null,"name":null,"phone":null,"dateOfBirth":null,"bookingDate":null,"bookingTime":null,"isGoodbye":false,"isYes":false,"isNo":false}`;
-
-  const openai = getOpenAIClient(apiKey);
-
-  try {
-    let content = '';
-    const stream = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: processedTranscript },
-      ],
-      temperature: 0.0,
-      max_tokens: 150,  // Reduced from 200 — JSON extraction output never exceeds 100 tokens
-      stream: true,
-    });
-
-    for await (const chunk of stream) {
-      const delta = chunk.choices?.[0]?.delta?.content;
-      if (delta) content += delta;
-    }
-
-    content = content.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '');
-
-    const parsed = JSON.parse(content) as Record<string, unknown>;
-
-    const intent = VALID_INTENTS.includes(parsed.intent as IntentType)
-      ? (parsed.intent as IntentType)
-      : null;
-
-    // Ensure phone is exactly 10 digits
-    const rawPhone = typeof parsed.phone === 'string' ? parsed.phone.replace(/\D/g, '') : null;
-    const phone = rawPhone && rawPhone.length === 10 ? rawPhone : null;
-
-    // Normalize dateOfBirth to MM/DD/YYYY regardless of what format the LLM returns
-    const rawDob = typeof parsed.dateOfBirth === 'string' && parsed.dateOfBirth.trim()
-      ? parsed.dateOfBirth.trim()
-      : null;
-    const dateOfBirth = rawDob ? (normalizeDOB(rawDob) ?? rawDob) : null;
-
-    return {
-      intent,
-      name: typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : null,
-      phone,
-      dateOfBirth,
-      bookingDate: typeof parsed.bookingDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.bookingDate) ? parsed.bookingDate : null,
-      bookingTime: typeof parsed.bookingTime === 'string' && parsed.bookingTime.trim() ? parsed.bookingTime.trim() : null,
-      isGoodbye: parsed.isGoodbye === true,
-      isYes: parsed.isYes === true,
-      isNo: parsed.isNo === true,
-    };
-  } catch (llmErr: unknown) {
-    // Never log transcript — PHI. Log the error type/message only.
-    const errMsg = llmErr instanceof Error ? llmErr.message : String(llmErr);
-    const errStatus = (llmErr as { status?: number })?.status ?? null;
-    console.warn(JSON.stringify({
-      level: 'warn',
-      service: 'conversationManager',
-      message: 'LLM extraction failed — using keyword fallback',
-      sessionId,
-      clinicId,
-      error: errMsg,
-      httpStatus: errStatus,
-    }));
-    return keywordExtract(transcript);
-  }
-}
+// (extractWithLLM removed — replaced by callLLM in llmPromptService.ts)
 
 // ---------------------------------------------------------------------------
 // In-memory session store
@@ -443,6 +335,7 @@ function getOrCreateSession(
     bookingConfirmed: false,
     lastAppointmentId: null,
     latencies: [],
+    conversationHistory: [],
     nameConfirmed: false,
     firstNameConfirmed: false,
     createdAt: new Date(),
@@ -600,549 +493,172 @@ async function processState(
   session: ConversationSession,
   transcript: string
 ): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean }> {
-  // Route to fast keyword extraction for states that only need structured data or yes/no.
-  // LLM is only needed for intent detection and relative-date booking ("next Tuesday").
-  // Skipping LLM for identity_verification cuts logic_ms from 2-4s → <100ms for those turns.
-  const needsLLM =
-    session.state === 'intent_detection' ||
-    session.state === 'booking_flow' ||
-    session.state === 'awaiting_date';
+  // ─── Greeting (hardcoded — no user input to process yet) ─────────────────
+  if (session.state === 'greeting') {
+    const clinicName = await getClinicName(session.clinicId);
+    return {
+      responseText: `Hello, thank you for calling ${clinicName}. How can I help you today?`,
+      nextState: 'intent_detection',
+      shouldAutoHangUp: false,
+    };
+  }
 
-  const extracted = session.state === 'greeting'
-    ? { ...LLM_EXTRACTED_DEFAULT }
-    : needsLLM
-      ? await extractWithLLM(transcript, session.sessionId, session.clinicId)
-      : keywordExtract(transcript);
+  // ─── All other states: single LLM call drives response + state + entities ─
+  const clinicName = await getClinicName(session.clinicId);
+  const preprocessed = preprocessSpelledLetters(transcript);
+  const ctx: LLMCallContext = {
+    sessionId: session.sessionId,
+    clinicId: session.clinicId,
+    state: session.state,
+    turnCount: session.turnCount,
+    verificationAttempts: session.verificationAttempts,
+    failedIntentAttempts: session.failedIntentAttempts,
+    collectedData: session.collectedData,
+    intent: session.intent,
+    bookingDate: session.bookingDate,
+    bookingTime: session.bookingTime,
+    identityVerified: session.identityVerified,
+    bookingConfirmed: session.bookingConfirmed,
+  };
 
-  switch (session.state) {
-    // ----- GREETING -----
-    case 'greeting': {
-      const clinicName = await getClinicName(session.clinicId);
-      return {
-        responseText: `Hello, thank you for calling ${clinicName}. How can I help you today?`,
-        nextState: 'intent_detection',
-        shouldAutoHangUp: false,
-      };
+  const llmResult = await callLLM(ctx, preprocessed, clinicName, session.conversationHistory);
+
+  // LLM failure fallback — re-prompt without changing state
+  if (!llmResult) {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      service: 'conversationManager',
+      message: 'callLLM returned null — using re-prompt fallback',
+      sessionId: session.sessionId,
+    }));
+    return {
+      responseText: 'I apologize, I missed that. Could you say that again?',
+      nextState: session.state,
+      shouldAutoHangUp: false,
+    };
+  }
+
+  const { next_state: rawNextState, response_text, extracted_entities: e } = llmResult;
+
+  const VALID_CONVERSATION_STATES: ConversationState[] = [
+    'greeting', 'intent_detection', 'identity_verification', 'booking_flow',
+    'awaiting_date', 'awaiting_time', 'cancel_flow', 'reschedule_flow',
+    'completed', 'handoff',
+  ];
+  let nextState: ConversationState = VALID_CONVERSATION_STATES.includes(rawNextState as ConversationState)
+    ? (rawNextState as ConversationState)
+    : session.state;
+  let responseText = response_text;
+
+  // ── 1. Update session with extracted entities (never overwrite confirmed data) ──
+  if (e.intent && (VALID_INTENTS as string[]).includes(e.intent) && !session.intent) {
+    session.intent = e.intent as IntentType;
+  }
+  if (e.name && !session.collectedData.name) {
+    session.collectedData.name = e.name;
+    session.firstNameConfirmed = true;
+    session.nameConfirmed = true;
+  }
+  if (e.dateOfBirth && !session.collectedData.dateOfBirth) {
+    session.collectedData.dateOfBirth = e.dateOfBirth;
+  }
+  if (e.phone && !session.collectedData.phone) {
+    session.collectedData.phone = `+1${e.phone}`;
+  }
+  if (e.bookingDate && !session.bookingDate) {
+    session.bookingDate = e.bookingDate;
+  }
+  if (e.bookingTime && !session.bookingTime) {
+    session.bookingTime = e.bookingTime;
+  }
+
+  // ── 2. Side-effect: patient upsert when identity verification is complete ──
+  const hasAllIdentityData =
+    session.collectedData.name &&
+    session.collectedData.dateOfBirth &&
+    session.collectedData.phone;
+  const leavingVerification =
+    session.state === 'identity_verification' && nextState !== 'identity_verification';
+
+  if (leavingVerification && hasAllIdentityData && !session.identityVerified) {
+    try {
+      const { patient } = await upsertPatient({
+        clinicId: session.clinicId,
+        name: session.collectedData.name!,
+        phone: session.collectedData.phone!,
+        dateOfBirth: session.collectedData.dateOfBirth ?? undefined,
+      });
+      session.verifiedPatientId = patient.id;
+      session.identityVerified = true;
+      console.log(JSON.stringify({
+        level: 'info',
+        service: 'conversationManager',
+        event: 'identity_verified',
+        sessionId: session.sessionId,
+        clinicId: session.clinicId,
+      }));
+    } catch (err) {
+      console.error(JSON.stringify({
+        level: 'error',
+        service: 'conversationManager',
+        message: 'upsertPatient failed',
+        sessionId: session.sessionId,
+        error: (err as Error).message,
+      }));
+      responseText = "I'm having trouble verifying your information. Let me connect you with a staff member.";
+      nextState = 'handoff';
     }
+  }
 
-    // ----- INTENT DETECTION -----
-    case 'intent_detection': {
-      if (!transcript) {
-        return { responseText: 'How can I help you today?', nextState: 'intent_detection', shouldAutoHangUp: false };
-      }
+  // Guard: prevent LLM from skipping identity_verification before all data is collected
+  if (leavingVerification && !hasAllIdentityData && !session.identityVerified) {
+    nextState = 'identity_verification';
+  }
 
-      const intent = extracted.intent;
+  // ── 3. Side-effect: booking confirmation when caller says yes ─────────────
+  const confirmingBooking =
+    !session.bookingConfirmed &&
+    session.bookingDate &&
+    session.bookingTime &&
+    e.isYes &&
+    (session.state === 'awaiting_time' || session.state === 'booking_flow');
 
-      if (intent && intent !== 'unknown') {
-        session.intent = intent;
+  if (confirmingBooking) {
+    const confirmResult = await confirmBooking(session, transcript);
+    session.conversationHistory.push({ role: 'user', content: preprocessed });
+    session.conversationHistory.push({ role: 'assistant', content: confirmResult.responseText });
+    if (session.conversationHistory.length > 6) {
+      session.conversationHistory.splice(0, session.conversationHistory.length - 6);
+    }
+    return { responseText: confirmResult.responseText, nextState: 'completed', shouldAutoHangUp: false };
+  }
 
-        // Capture any date/time the LLM found alongside the intent
-        if (extracted.bookingDate) session.bookingDate = extracted.bookingDate;
-        if (extracted.bookingTime) session.bookingTime = extracted.bookingTime;
-
-        switch (intent) {
-          case 'book_appointment':
-          case 'cancel_appointment':
-          case 'reschedule_appointment':
-            return {
-              responseText: 'Sure, I can help with that. First I need to verify your identity. May I have your full name?',
-              nextState: 'identity_verification',
-              shouldAutoHangUp: false,
-            };
-          case 'clinic_question':
-            return {
-              responseText: 'I can try to answer your question, but for detailed information, a staff member would be better. Could you tell me more about what you need?',
-              nextState: 'intent_detection',
-              shouldAutoHangUp: false,
-            };
-          default:
-            break;
-        }
-      }
-
-      session.failedIntentAttempts++;
-      if (session.failedIntentAttempts >= 3) {
+  // ── 4. Track failed attempts — escalate to handoff after 5 stuck turns ────
+  if (session.state === nextState && transcript.trim() && session.state !== 'completed') {
+    const madeProgress = e.name || e.dateOfBirth || e.phone || e.bookingDate || e.bookingTime || e.intent;
+    if (!madeProgress && !e.isYes && !e.isNo) {
+      session.verificationAttempts++;
+      if (session.verificationAttempts >= 5) {
         return {
           responseText: 'Let me connect you with a staff member who can better assist you. Please hold.',
           nextState: 'handoff',
           shouldAutoHangUp: false,
         };
       }
-      return {
-        responseText: "I'm sorry, I didn't quite understand. Could you tell me how I can help you? For example, would you like to book, cancel, or reschedule an appointment?",
-        nextState: 'intent_detection',
-        shouldAutoHangUp: false,
-      };
+    } else {
+      session.verificationAttempts = 0;
     }
-
-    // ----- IDENTITY VERIFICATION -----
-    case 'identity_verification': {
-      // ----------------------------------------------------------------
-      // Step 1: collect name — nothing stored yet
-      // ----------------------------------------------------------------
-      if (!session.collectedData.name) {
-        const name = extracted.name;
-        if (name) {
-          session.collectedData.name = name;
-          // Detect if spelling was used: preprocessing changed the raw transcript
-          const wasSpelled = preprocessSpelledLetters(transcript).toLowerCase() !== transcript.toLowerCase();
-          if (wasSpelled) {
-            // Spelling detected — ask for simple yes/no confirmation of the resolved name
-            session.firstNameConfirmed = false;
-            session.nameConfirmed = false;
-            return {
-              responseText: `Did I get that right — your name is "${name}"? Please say yes or no.`,
-              nextState: 'identity_verification',
-              shouldAutoHangUp: false,
-            };
-          }
-          // Not spelled — accept immediately, go straight to DOB
-          session.firstNameConfirmed = true;
-          session.nameConfirmed = true;
-          const firstName = name.trim().split(/\s+/)[0];
-          return {
-            responseText: `Got it, ${firstName}. And your date of birth?`,
-            nextState: 'identity_verification',
-            shouldAutoHangUp: false,
-          };
-        }
-        session.verificationAttempts++;
-        if (session.verificationAttempts >= 3) {
-          return {
-            responseText: 'Let me connect you with a staff member. Please hold.',
-            nextState: 'handoff',
-            shouldAutoHangUp: false,
-          };
-        }
-        return {
-          responseText: 'Could you please tell me your full name? For example, you can say "My name is John Smith."',
-          nextState: 'identity_verification',
-          shouldAutoHangUp: false,
-        };
-      }
-
-      // ----------------------------------------------------------------
-      // Step 2: simple yes/no spelling confirmation (only reached when wasSpelled=true)
-      // ----------------------------------------------------------------
-      if (!session.firstNameConfirmed) {
-        const name = session.collectedData.name!;
-
-        if (extracted.isYes) {
-          // Confirmed — accept and move to DOB
-          session.firstNameConfirmed = true;
-          session.nameConfirmed = true;
-          const firstName = name.trim().split(/\s+/)[0];
-          console.log(JSON.stringify({
-            level: 'info',
-            service: 'conversationManager',
-            event: 'name_confirmed',
-            sessionId: session.sessionId,
-            clinicId: session.clinicId,
-          }));
-          return {
-            responseText: `Got it, ${firstName}. And your date of birth?`,
-            nextState: 'identity_verification',
-            shouldAutoHangUp: false,
-          };
-        }
-
-        if (extracted.isNo) {
-          // Rejected — clear and ask to spell again
-          session.collectedData.name = undefined;
-          session.firstNameConfirmed = false;
-          session.nameConfirmed = false;
-          session.verificationAttempts++;
-          if (session.verificationAttempts >= 3) {
-            return { responseText: 'Let me connect you with a staff member. Please hold.', nextState: 'handoff', shouldAutoHangUp: false };
-          }
-          return {
-            responseText: 'I apologize — could you please spell your name again?',
-            nextState: 'identity_verification',
-            shouldAutoHangUp: false,
-          };
-        }
-
-        // Caller re-spelled or re-stated their name
-        if (extracted.name) {
-          session.collectedData.name = extracted.name;
-          const wasSpelled2 = preprocessSpelledLetters(transcript).toLowerCase() !== transcript.toLowerCase();
-          if (wasSpelled2) {
-            return {
-              responseText: `Did I get that right — your name is "${extracted.name}"? Please say yes or no.`,
-              nextState: 'identity_verification',
-              shouldAutoHangUp: false,
-            };
-          }
-          session.firstNameConfirmed = true;
-          session.nameConfirmed = true;
-          const firstName2 = extracted.name.trim().split(/\s+/)[0];
-          return {
-            responseText: `Got it, ${firstName2}. And your date of birth?`,
-            nextState: 'identity_verification',
-            shouldAutoHangUp: false,
-          };
-        }
-
-        // Re-prompt: repeat exactly what we heard
-        return {
-          responseText: `I heard "${name}". Is that correct? Please say yes or no.`,
-          nextState: 'identity_verification',
-          shouldAutoHangUp: false,
-        };
-      }
-
-      // ----------------------------------------------------------------
-      // Step 3: confirm last name phonetically
-      // ----------------------------------------------------------------
-      if (!session.nameConfirmed) {
-        const nameWords = session.collectedData.name.trim().split(/\s+/);
-        const firstName = nameWords[0];
-        const hasLastName = nameWords.length > 1;
-
-        if (!hasLastName) {
-          // Still waiting to hear last name
-          const newName = extracted.name;
-          if (newName) {
-            const newWords = newName.trim().split(/\s+/);
-            const lastName = newWords.length > 1 ? newWords.slice(1).join(' ') : newWords[0];
-            session.collectedData.name = `${firstName} ${lastName}`;
-            return {
-              responseText: `${lastName} — ${spellPhonetic(lastName)}. Is that right?`,
-              nextState: 'identity_verification',
-              shouldAutoHangUp: false,
-            };
-          }
-          session.verificationAttempts++;
-          if (session.verificationAttempts >= 3) {
-            return { responseText: 'Let me connect you with a staff member. Please hold.', nextState: 'handoff', shouldAutoHangUp: false };
-          }
-          return {
-            responseText: 'Could you please tell me your last name?',
-            nextState: 'identity_verification',
-            shouldAutoHangUp: false,
-          };
-        }
-
-        const lastName = nameWords.slice(1).join(' ');
-
-        if (extracted.isYes) {
-          session.nameConfirmed = true;
-          console.log(JSON.stringify({
-            level: 'info',
-            service: 'conversationManager',
-            event: 'name_confirmed',
-            sessionId: session.sessionId,
-            clinicId: session.clinicId,
-          }));
-          return {
-            responseText: 'And your date of birth?',
-            nextState: 'identity_verification',
-            shouldAutoHangUp: false,
-          };
-        }
-
-        if (extracted.isNo) {
-          // Keep first name, clear last name
-          session.collectedData.name = firstName;
-          return {
-            responseText: 'I apologize — could you please tell me your last name?',
-            nextState: 'identity_verification',
-            shouldAutoHangUp: false,
-          };
-        }
-
-        // Caller said last name again
-        if (extracted.name) {
-          const newWords = extracted.name.trim().split(/\s+/);
-          const newLastName = newWords.length > 1 ? newWords.slice(1).join(' ') : newWords[0];
-          session.collectedData.name = `${firstName} ${newLastName}`;
-          return {
-            responseText: `${newLastName} — ${spellPhonetic(newLastName)}. Is that right?`,
-            nextState: 'identity_verification',
-            shouldAutoHangUp: false,
-          };
-        }
-
-        return {
-          responseText: `Just to confirm — your last name is ${lastName}, that's ${spellPhonetic(lastName)}. Please say yes or no.`,
-          nextState: 'identity_verification',
-          shouldAutoHangUp: false,
-        };
-      }
-
-      // ----------------------------------------------------------------
-      // Step 4: collect DOB
-      // ----------------------------------------------------------------
-      if (!session.collectedData.dateOfBirth) {
-        const dob = extracted.dateOfBirth;
-        if (dob) {
-          session.collectedData.dateOfBirth = dob;
-          return {
-            responseText: 'Great. And your phone number?',
-            nextState: 'identity_verification',
-            shouldAutoHangUp: false,
-          };
-        }
-        session.verificationAttempts++;
-        if (session.verificationAttempts >= 3) {
-          return {
-            responseText: 'Let me connect you with a staff member. Please hold.',
-            nextState: 'handoff',
-            shouldAutoHangUp: false,
-          };
-        }
-        return {
-          responseText: 'I need your date of birth. For example, you can say "January 15, 1990" or "01/15/1990".',
-          nextState: 'identity_verification',
-          shouldAutoHangUp: false,
-        };
-      }
-
-      // ----------------------------------------------------------------
-      // Step 5: collect phone
-      // ----------------------------------------------------------------
-      if (!session.collectedData.phone) {
-        const rawPhone = extracted.phone; // 10 digits from LLM
-        const phone = rawPhone ? `+1${rawPhone}` : null;
-        if (phone) {
-          session.collectedData.phone = phone;
-
-          try {
-            const { patient } = await upsertPatient({
-              clinicId: session.clinicId,
-              name: session.collectedData.name,
-              phone,
-              dateOfBirth: session.collectedData.dateOfBirth ?? undefined,
-            });
-            session.verifiedPatientId = patient.id;
-            session.identityVerified = true;
-
-            let nextState: ConversationState = 'booking_flow';
-            let responseText = 'Thank you. I have verified your identity. What date works for you?';
-            if (session.intent === 'cancel_appointment') {
-              nextState = 'completed';
-              responseText = "Thank you. I have verified your identity. Your appointment has been cancelled. You will receive a confirmation text shortly. Is there anything else I can help you with?";
-            } else if (session.intent === 'reschedule_appointment') {
-              nextState = 'booking_flow';
-              responseText = 'Thank you. I have verified your identity. What new date works for you?';
-            }
-            return { responseText, nextState, shouldAutoHangUp: false };
-          } catch (err: unknown) {
-            const error = err as Error;
-            console.error(JSON.stringify({
-              level: 'error',
-              service: 'conversationManager',
-              message: 'Patient upsert failed',
-              sessionId: session.sessionId,
-              clinicId: session.clinicId,
-              error: error.message,
-            }));
-            return {
-              responseText: "I'm having trouble verifying your information. Let me connect you with a staff member.",
-              nextState: 'handoff',
-              shouldAutoHangUp: false,
-            };
-          }
-        }
-
-        session.verificationAttempts++;
-        if (session.verificationAttempts >= 3) {
-          return {
-            responseText: 'Let me connect you with a staff member. Please hold.',
-            nextState: 'handoff',
-            shouldAutoHangUp: false,
-          };
-        }
-        return {
-          responseText: 'Could you please provide your phone number? For example, "555-123-4567".',
-          nextState: 'identity_verification',
-          shouldAutoHangUp: false,
-        };
-      }
-
-      return { responseText: 'One moment please.', nextState: session.state, shouldAutoHangUp: false };
-    }
-
-    // ----- BOOKING FLOW -----
-    case 'booking_flow':
-    case 'awaiting_date': {
-      if (!session.bookingDate) {
-        const date = extracted.bookingDate;
-        if (date) {
-          session.bookingDate = date;
-          if (session.bookingTime) {
-            return {
-              responseText: `I have ${session.bookingDate} at ${session.bookingTime}. Shall I confirm this appointment?`,
-              nextState: 'awaiting_time',
-              shouldAutoHangUp: false,
-            };
-          }
-          return {
-            responseText: 'What time works best for you?',
-            nextState: 'awaiting_time',
-            shouldAutoHangUp: false,
-          };
-        }
-        return {
-          responseText: 'What date works for you? You can say something like "next Tuesday" or "April 9th".',
-          nextState: 'awaiting_date',
-          shouldAutoHangUp: false,
-        };
-      }
-
-      if (!session.bookingTime) {
-        const time = extracted.bookingTime;
-        if (time) {
-          session.bookingTime = time;
-          return {
-            responseText: `I have ${session.bookingDate} at ${session.bookingTime}. Shall I confirm this appointment?`,
-            nextState: 'awaiting_time',
-            shouldAutoHangUp: false,
-          };
-        }
-        return {
-          responseText: 'What time works best for you? For example, "10am" or "2:30 PM".',
-          nextState: 'awaiting_time',
-          shouldAutoHangUp: false,
-        };
-      }
-
-      if (!session.bookingConfirmed) {
-        if (extracted.isYes) {
-          const result = await confirmBooking(session, transcript);
-          return { ...result, shouldAutoHangUp: false };
-        }
-        if (extracted.isNo) {
-          session.bookingDate = null;
-          session.bookingTime = null;
-          return {
-            responseText: 'No problem. What date would you prefer instead?',
-            nextState: 'awaiting_date',
-            shouldAutoHangUp: false,
-          };
-        }
-        return {
-          responseText: `I have ${session.bookingDate} at ${session.bookingTime}. Shall I confirm this appointment? Please say yes or no.`,
-          nextState: 'awaiting_time',
-          shouldAutoHangUp: false,
-        };
-      }
-
-      return { responseText: 'Your appointment is already confirmed. Is there anything else I can help you with?', nextState: 'completed', shouldAutoHangUp: false };
-    }
-
-    // ----- AWAITING TIME -----
-    case 'awaiting_time': {
-      if (!session.bookingTime) {
-        const time = extracted.bookingTime;
-        if (time) {
-          session.bookingTime = time;
-          return {
-            responseText: `I have ${session.bookingDate} at ${session.bookingTime}. Shall I confirm this appointment?`,
-            nextState: 'awaiting_time',
-            shouldAutoHangUp: false,
-          };
-        }
-        return {
-          responseText: 'What time works best for you? For example, "10am" or "2:30 PM".',
-          nextState: 'awaiting_time',
-          shouldAutoHangUp: false,
-        };
-      }
-
-      if (!session.bookingConfirmed) {
-        if (extracted.isYes) {
-          const result = await confirmBooking(session, transcript);
-          return { ...result, shouldAutoHangUp: false };
-        }
-        if (extracted.isNo) {
-          session.bookingDate = null;
-          session.bookingTime = null;
-          return {
-            responseText: 'No problem. What date would you prefer instead?',
-            nextState: 'awaiting_date',
-            shouldAutoHangUp: false,
-          };
-        }
-        return {
-          responseText: `I have ${session.bookingDate} at ${session.bookingTime}. Shall I confirm this appointment? Please say yes or no.`,
-          nextState: 'awaiting_time',
-          shouldAutoHangUp: false,
-        };
-      }
-
-      return { responseText: 'Your appointment is already confirmed. Is there anything else I can help you with?', nextState: 'completed', shouldAutoHangUp: false };
-    }
-
-    // ----- CANCEL FLOW -----
-    case 'cancel_flow': {
-      return {
-        responseText: "Your appointment has been cancelled. Is there anything else I can help you with?",
-        nextState: 'completed',
-        shouldAutoHangUp: false,
-      };
-    }
-
-    // ----- RESCHEDULE FLOW -----
-    case 'reschedule_flow': {
-      return {
-        responseText: "Let's reschedule your appointment. What new date works for you?",
-        nextState: 'booking_flow',
-        shouldAutoHangUp: false,
-      };
-    }
-
-    // ----- COMPLETED -----
-    case 'completed': {
-      if (transcript && transcript.length > 0) {
-        if (extracted.isGoodbye) {
-          return {
-            responseText: 'Thank you for calling. Goodbye!',
-            nextState: 'handoff',
-            shouldAutoHangUp: true,
-          };
-        }
-
-        // Caller said something else — reset for a new intent
-        session.intent = null;
-        session.failedIntentAttempts = 0;
-        session.collectedData = {};
-        session.identityVerified = false;
-        session.verifiedPatientId = null;
-        session.verificationAttempts = 0;
-        session.bookingDate = null;
-        session.bookingTime = null;
-        session.bookingConfirmed = false;
-        session.lastAppointmentId = null;
-        return {
-          responseText: 'Sure, how else can I help you?',
-          nextState: 'intent_detection',
-          shouldAutoHangUp: false,
-        };
-      }
-      return {
-        responseText: 'Is there anything else I can help you with today?',
-        nextState: 'completed',
-        shouldAutoHangUp: false,
-      };
-    }
-
-    // ----- HANDOFF -----
-    case 'handoff': {
-      return {
-        responseText: 'Let me connect you with a staff member. Please hold.',
-        nextState: 'handoff',
-        shouldAutoHangUp: false,
-      };
-    }
-
-    default:
-      return {
-        responseText: 'Let me connect you with a staff member. Please hold.',
-        nextState: 'handoff',
-        shouldAutoHangUp: false,
-      };
   }
+
+  // ── 5. Update conversation history (keep last 3 turns = 6 messages) ──────
+  session.conversationHistory.push({ role: 'user', content: preprocessed });
+  session.conversationHistory.push({ role: 'assistant', content: responseText });
+  if (session.conversationHistory.length > 6) {
+    session.conversationHistory.splice(0, session.conversationHistory.length - 6);
+  }
+
+  const shouldAutoHangUp = (e.isGoodbye || false) && (nextState === 'handoff' || nextState === 'completed');
+  return { responseText, nextState, shouldAutoHangUp };
 }
 
 // ---------------------------------------------------------------------------
