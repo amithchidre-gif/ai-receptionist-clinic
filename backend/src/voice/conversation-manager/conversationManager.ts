@@ -119,9 +119,9 @@ const PHONETIC_REVERSE: Record<string, string> = {
 /**
  * Pre-process a transcript to resolve letter-by-letter spelling into words.
  * Handles:
- *   "A-M-I-T" or "A.M.I.T"             → "Amit"
- *   "A M I T" (3+ consecutive single)  → "Amit"
- *   "A as in Alpha, M as in Mike …"    → "Amit"
+ *   "A-M-I-T", "A.M.I.T", "a - m - i - t"     → "Amit"
+ *   "A M I T" / "a m i t" (3+ consecutive)    → "Amit"
+ *   "A as in Alpha, M as in Mike …"           → "Amit"
  */
 export function preprocessSpelledLetters(text: string): string {
   let result = text.trim();
@@ -133,12 +133,17 @@ export function preprocessSpelledLetters(text: string): string {
       PHONETIC_REVERSE[phonetic.toLowerCase()] ?? letter.toUpperCase(),
   );
 
-  // Step 2 — Dash or dot separated single letters (3+ letters): "A-M-I-T" or "A.M.I.T" → "Amit"
+  // Step 2 — Separator-delimited single letters (3+), allowing optional spaces around separator.
+  // Handles: "A-M-I-T", "A.M.I.T", "a - m - i - t", "A_M_I_T"
   result = result.replace(
-    /\b([A-Za-z])(?:[-.]([A-Za-z])){2,}\b/g,
+    /\b([A-Za-z])(?:\s*[-._]\s*[A-Za-z]){2,}\b/g,
     (match: string) => {
-      const chars = match.split(/[-.]/).map((c: string) => c.toUpperCase());
-      return chars[0] + chars.slice(1).map((c: string) => c.toLowerCase()).join('');
+      // Extract the individual letter characters only
+      const chars = match.replace(/[\s\-._]/g, ' ').trim().split(/\s+/).filter(
+        (c: string) => /^[A-Za-z]$/.test(c)
+      );
+      if (chars.length < 3) return match;
+      return chars[0].toUpperCase() + chars.slice(1).map((c: string) => c.toLowerCase()).join('');
     },
   );
 
@@ -215,10 +220,22 @@ function keywordExtract(transcript: string): LLMExtracted {
     }
   }
 
-  // Phone: 10 consecutive digits
-  const phoneDigits = preprocessed.replace(/[-.()\s]/g, '');
-  const phoneMatch = phoneDigits.match(/\b(\d{10})\b/);
-  if (phoneMatch) result.phone = phoneMatch[1];
+  // Phone: 10 consecutive digits, also handles spoken digits ("five five five ...")
+  const SPOKEN_DIGITS: Record<string, string> = {
+    zero: '0', one: '1', two: '2', three: '3', four: '4',
+    five: '5', six: '6', seven: '7', eight: '8', nine: '9', oh: '0',
+  };
+  const expandedPhone = preprocessed
+    .replace(/\bdouble\s+([a-z])\b/gi, (_: string, c: string) => c + c)
+    .replace(/\btriple\s+([a-z])\b/gi, (_: string, c: string) => c + c + c)
+    .replace(/\b(zero|one|two|three|four|five|six|seven|eight|nine|oh)\b/gi,
+      (m: string) => SPOKEN_DIGITS[m.toLowerCase()] ?? m);
+  const phoneDigits = expandedPhone.replace(/[-.()+\s]/g, '');
+  const phoneRaw = phoneDigits.match(/(\d{10,11})/);
+  if (phoneRaw) {
+    const digits = phoneRaw[1].replace(/^1(\d{10})$/, '$1');
+    if (digits.length === 10) result.phone = digits;
+  }
 
   // DOB: "March 30 1985", "March 30th, 1985", "30 March 1985"
   const MONTHS: Record<string, string> = {
@@ -583,11 +600,19 @@ async function processState(
   session: ConversationSession,
   transcript: string
 ): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean }> {
-  // Run LLM extraction once per turn for all states that need user input.
-  // Greeting state generates a response without needing any extraction.
-  const extracted = session.state !== 'greeting'
-    ? await extractWithLLM(transcript, session.sessionId, session.clinicId)
-    : { ...LLM_EXTRACTED_DEFAULT };
+  // Route to fast keyword extraction for states that only need structured data or yes/no.
+  // LLM is only needed for intent detection and relative-date booking ("next Tuesday").
+  // Skipping LLM for identity_verification cuts logic_ms from 2-4s → <100ms for those turns.
+  const needsLLM =
+    session.state === 'intent_detection' ||
+    session.state === 'booking_flow' ||
+    session.state === 'awaiting_date';
+
+  const extracted = session.state === 'greeting'
+    ? { ...LLM_EXTRACTED_DEFAULT }
+    : needsLLM
+      ? await extractWithLLM(transcript, session.sessionId, session.clinicId)
+      : keywordExtract(transcript);
 
   switch (session.state) {
     // ----- GREETING -----
