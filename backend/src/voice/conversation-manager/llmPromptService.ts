@@ -61,6 +61,9 @@ export interface LLMTurnResult {
   next_state: string;
   response_text: string;
   extracted_entities: LLMExtractedEntities;
+  /** The exact JSON string the model produced — stored in conversation history so the
+   *  model always sees its prior responses in JSON format and continues in JSON. */
+  raw_json: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +235,7 @@ export async function callLLM(
     // Strip markdown code fences if the model adds them despite instructions
     content = content.trim().replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
 
+    const rawJson = content; // save before parsing — used for conversation history
     const parsed = JSON.parse(content) as Record<string, unknown>;
     const e = (parsed.extracted_entities ?? {}) as Record<string, unknown>;
 
@@ -275,6 +279,7 @@ export async function callLLM(
         isNo: e.isNo === true,
         isGoodbye: e.isGoodbye === true,
       },
+      raw_json: rawJson,
     };
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);

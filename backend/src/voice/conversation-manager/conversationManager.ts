@@ -626,7 +626,8 @@ async function processState(
   if (confirmingBooking) {
     const confirmResult = await confirmBooking(session, transcript);
     session.conversationHistory.push({ role: 'user', content: preprocessed });
-    session.conversationHistory.push({ role: 'assistant', content: confirmResult.responseText });
+    // Store as JSON so model continues in JSON format on subsequent turns
+    session.conversationHistory.push({ role: 'assistant', content: JSON.stringify({ next_state: 'completed', response_text: confirmResult.responseText, extracted_entities: {} }) });
     if (session.conversationHistory.length > 6) {
       session.conversationHistory.splice(0, session.conversationHistory.length - 6);
     }
@@ -651,8 +652,10 @@ async function processState(
   }
 
   // ── 5. Update conversation history (keep last 3 turns = 6 messages) ──────
+  // IMPORTANT: store raw_json (not responseText) so the model sees its prior responses
+  // were JSON and continues outputting JSON on every subsequent turn.
   session.conversationHistory.push({ role: 'user', content: preprocessed });
-  session.conversationHistory.push({ role: 'assistant', content: responseText });
+  session.conversationHistory.push({ role: 'assistant', content: llmResult.raw_json });
   if (session.conversationHistory.length > 6) {
     session.conversationHistory.splice(0, session.conversationHistory.length - 6);
   }
