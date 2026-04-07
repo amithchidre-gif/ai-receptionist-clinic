@@ -100,7 +100,7 @@ Return ONLY valid JSON. No markdown, no explanation, no code blocks. Just JSON:
 
   try {
     const response = await openai.chat.completions.create({
-      model: config.openrouterModel,
+      model: 'gpt-4o-mini',
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: transcript }

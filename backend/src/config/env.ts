@@ -69,7 +69,7 @@ export const config = {
   inworldApiKey: process.env.INWORLD_API_KEY ?? '',
   inworldVoiceId: process.env.INWORLD_VOICE_ID ?? 'Ashley',
   openrouterApiKey: process.env.OPENAI_API_KEY ?? '',
-  openrouterModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+  openrouterModel: (process.env.OPENAI_MODEL ?? 'gpt-4o-mini').replace(/^openai\//, ''),
   googleApplicationCredentials: process.env.GOOGLE_APPLICATION_CREDENTIALS ?? '',
   frontendUrl: process.env.FRONTEND_URL ?? 'http://localhost:3000',
   baseUrl: process.env.BASE_URL ?? 'http://localhost:4000',

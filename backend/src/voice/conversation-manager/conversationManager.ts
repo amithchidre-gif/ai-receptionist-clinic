@@ -245,7 +245,7 @@ Always return ALL fields. Use null for missing strings, false for missing boolea
   try {
     const response = await openai.chat.completions.create(
       {
-        model: config.openrouterModel,
+        model: 'gpt-4o-mini',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: transcript },
