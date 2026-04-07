@@ -133,7 +133,7 @@ export function preprocessSpelledLetters(text: string): string {
       PHONETIC_REVERSE[phonetic.toLowerCase()] ?? letter.toUpperCase(),
   );
 
-  // Step 2 — Dash or dot separated single letters (3+ letters): "A-M-I-T" → "Amit"
+  // Step 2 — Dash or dot separated single letters (3+ letters): "A-M-I-T" or "A.M.I.T" → "Amit"
   result = result.replace(
     /\b([A-Za-z])(?:[-.]([A-Za-z])){2,}\b/g,
     (match: string) => {
@@ -142,13 +142,22 @@ export function preprocessSpelledLetters(text: string): string {
     },
   );
 
-  // Step 3 — Space-separated single uppercase letters (3+): "A M I T" → "Amit"
-  // Requires capitalized letters — Deepgram smart_format uppercases individually spoken letters.
+  // Step 2b — Comma-separated single letters (3+): "A, M, I, T" or "A,M,I,T" → "Amit"
   result = result.replace(
-    /\b([A-Z] ){2,}[A-Z]\b/g,
+    /\b([A-Za-z])(?:,\s*([A-Za-z])){2,}\b/g,
+    (match: string) => {
+      const chars = match.split(/,\s*/).map((c: string) => c.trim().toUpperCase());
+      return chars[0] + chars.slice(1).map((c: string) => c.toLowerCase()).join('');
+    },
+  );
+
+  // Step 3 — Space-separated single letters (3+): "A M I T" or "a m i t" → "Amit"
+  // Case-insensitive: Deepgram smart_format usually uppercases spoken letters, but may not always.
+  result = result.replace(
+    /\b([A-Za-z] ){2,}[A-Za-z]\b/g,
     (match: string) => {
       const chars = match.trim().split(' ');
-      return chars[0] + chars.slice(1).map((c: string) => c.toLowerCase()).join('');
+      return chars[0].toUpperCase() + chars.slice(1).map((c: string) => c.toLowerCase()).join('');
     },
   );
 
@@ -187,7 +196,7 @@ function keywordExtract(transcript: string): LLMExtracted {
 
   // Name: "my name is X Y", "I am X Y", "I'm X", "this is X Y" — use preprocessed for spelling
   const nameMatch = preprocessed.match(
-    /(?:my name is|i am|i'm|this is|name's)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
+    /(?:my name is|i am|i'm|this is|name's|last name is|last name's)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
   );
   if (nameMatch) {
     result.name = nameMatch[1]
@@ -195,6 +204,15 @@ function keywordExtract(transcript: string): LLMExtracted {
       .split(/\s+/)
       .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
       .join(' ');
+  }
+
+  // Bare-name fallback: caller says just their name ("Amit" or "Amit Chidre") with no prefix.
+  // Only fires when no other name was found and the entire preprocessed transcript is 1–3 title-case words.
+  if (!result.name) {
+    const bare = preprocessed.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})$/);
+    if (bare) {
+      result.name = bare[1];
+    }
   }
 
   // Phone: 10 consecutive digits
@@ -641,11 +659,13 @@ async function processState(
         const name = extracted.name;
         if (name) {
           session.collectedData.name = name;
-          session.firstNameConfirmed = false;
-          session.nameConfirmed = false;
+          // Accept the name immediately — no phonetic confirmation required.
+          // This saves 2–3 turns and prevents the confirmation loop.
+          session.firstNameConfirmed = true;
+          session.nameConfirmed = true;
           const firstName = name.trim().split(/\s+/)[0];
           return {
-            responseText: `Got it. Did I hear your first name correctly? That's ${firstName} — ${spellPhonetic(firstName)}. Is that right?`,
+            responseText: `Got it, ${firstName}. And your date of birth?`,
             nextState: 'identity_verification',
             shouldAutoHangUp: false,
           };
@@ -666,7 +686,8 @@ async function processState(
       }
 
       // ----------------------------------------------------------------
-      // Step 2: confirm first name phonetically
+      // Step 2: (skipped — phonetic first-name confirmation removed)
+      // firstNameConfirmed is set to true in step 1 above.
       // ----------------------------------------------------------------
       if (!session.firstNameConfirmed) {
         const nameWords = session.collectedData.name.trim().split(/\s+/);
@@ -1125,67 +1146,74 @@ async function confirmBooking(
     }));
   }
 
-  // 2. Create Google Calendar event (non-fatal on failure)
-  let googleEventId: string | null = null;
-  try {
-    const calEvent = await createCalendarEvent({ clinicId, slot, summary: 'Appointment' });
-    googleEventId = calEvent.eventId;
-  } catch (err) {
-    console.warn(`[confirmBooking] Calendar event creation failed for session=${session.sessionId}, clinic=${clinicId}. Continuing without calendar event.`);
-  }
-
-  // 3. Create appointment in DB (non-fatal on failure)
-  try {
-    if (session.verifiedPatientId) {
+  // 2. Create appointment in DB immediately — needed for appointment ID
+  if (session.verifiedPatientId) {
+    try {
       const appointment = await createAppointment({
         clinicId,
         patientId: session.verifiedPatientId,
         appointmentDate: isoDate,
         appointmentTime: isoTime,
-        googleEventId: googleEventId ?? undefined,
+        googleEventId: undefined,  // filled in by background task below
         createdVia: 'voice',
       });
       session.lastAppointmentId = appointment.id;
-
-      // 3a. Get clinic name for SMS messages
-      const settings = await getSettingsByClinicId(clinicId);
-      const clinicName = settings?.clinicName || 'the clinic';
-
-      // 3b. Send confirmation SMS — must not affect booking flow
-      try {
-        await sendConfirmationSms(
-          clinicId,
-          session.collectedData.phone!,
-          session.collectedData.name!,
-          session.bookingDate!,
-          session.bookingTime!,
-          clinicName,
-        );
-      } catch (smsErr) {
-        console.warn('[confirmBooking] Confirmation SMS failed — booking still confirmed:', (smsErr as Error).message);
-      }
-
-      // 3c. Create form token + send form link
-      try {
-        const { createFormToken } = require('../../services/formTokenService');
-        const token = await createFormToken({
-          clinicId,
-          appointmentId: session.lastAppointmentId!,
-          patientId: session.verifiedPatientId!,
-        });
-        const formUrl = `${config.frontendUrl}/intake/${token}`;
-        await sendFormLinkSms(clinicId, session.collectedData.phone!, formUrl);
-        console.log(JSON.stringify({ level: 'info', service: 'conversationManager', message: 'Form link sent', clinicId, appointmentId: session.lastAppointmentId }));
-      } catch (err) {
-        console.warn(JSON.stringify({ level: 'warn', service: 'conversationManager', message: 'Form link SMS failed', clinicId, error: err instanceof Error ? err.message : 'Unknown' }));
-      }
+    } catch (err) {
+      console.error(`[confirmBooking] DB appointment creation failed for session=${session.sessionId}, clinic=${clinicId}. Patient was told confirmed.`);
     }
-  } catch (err) {
-    console.error(`[confirmBooking] DB appointment creation failed for session=${session.sessionId}, clinic=${clinicId}. Patient was told confirmed.`);
   }
 
   session.bookingConfirmed = true;
   const resp = `Your appointment is confirmed for ${rawDate} at ${rawTime}. You will receive a confirmation text message shortly.`;
+
+  // 3. Fire-and-forget: calendar event + SMS + form link — none of these block the voice response.
+  // Captured in closure so the call can return immediately.
+  const _patientId = session.verifiedPatientId;
+  const _appointmentId = session.lastAppointmentId;
+  const _phone = session.collectedData.phone!;
+  const _name = session.collectedData.name!;
+  const _bookingDate = session.bookingDate!;
+  const _bookingTime = session.bookingTime!;
+
+  setImmediate(async () => {
+    // 3a. Google Calendar event
+    let googleEventId: string | null = null;
+    try {
+      const calEvent = await createCalendarEvent({ clinicId, slot, summary: 'Appointment' });
+      googleEventId = calEvent.eventId;
+      if (_appointmentId && googleEventId) {
+        await query(
+          'UPDATE appointments SET google_event_id = $1 WHERE id = $2',
+          [googleEventId, _appointmentId]
+        );
+      }
+    } catch {
+      console.warn(`[confirmBooking] Background: calendar event creation failed, clinic=${clinicId}`);
+    }
+
+    // 3b. Confirmation SMS
+    try {
+      const settings = await getSettingsByClinicId(clinicId);
+      const clinicName = settings?.clinicName || 'the clinic';
+      await sendConfirmationSms(clinicId, _phone, _name, _bookingDate, _bookingTime, clinicName);
+    } catch (smsErr) {
+      console.warn('[confirmBooking] Background: confirmation SMS failed:', (smsErr as Error).message);
+    }
+
+    // 3c. Intake form link SMS
+    if (_patientId && _appointmentId) {
+      try {
+        const { createFormToken } = require('../../services/formTokenService');
+        const token = await createFormToken({ clinicId, appointmentId: _appointmentId, patientId: _patientId });
+        const formUrl = `${config.frontendUrl}/intake/${token}`;
+        await sendFormLinkSms(clinicId, _phone, formUrl);
+        console.log(JSON.stringify({ level: 'info', service: 'conversationManager', message: 'Background: form link sent', clinicId, appointmentId: _appointmentId }));
+      } catch (err) {
+        console.warn(JSON.stringify({ level: 'warn', service: 'conversationManager', message: 'Background: form link SMS failed', clinicId, error: err instanceof Error ? err.message : 'Unknown' }));
+      }
+    }
+  });
+
   return { responseText: resp, nextState: 'completed' };
 }
 
@@ -1279,14 +1307,12 @@ export async function runPipelineTurn(
     turnCount: session.turnCount,
   }));
 
-  // 7 + 8. Parallel: save session to DB AND synthesize TTS simultaneously
-  // Previously these were sequential — parallelising saves 100-300ms per turn.
+  // 7. Fire-and-forget DB save — don't wait for it, TTS is the bottleneck.
+  saveSessionToDB(session).catch(() => undefined);
+
+  // 8. Await only TTS — this is the true latency gate.
   let ttsResult: TtsResult | null = null;
-  const [ttsResultOrNull] = await Promise.all([
-    synthesize({ text: responseText, sessionId, clinicId }).catch(() => null),
-    saveSessionToDB(session).catch(() => undefined),
-  ]);
-  ttsResult = ttsResultOrNull;
+  ttsResult = await synthesize({ text: responseText, sessionId, clinicId }).catch(() => null);
 
   const t4 = Date.now(); // TTS complete
 
