@@ -70,7 +70,7 @@ export function initDeepgramSession(callControlId: string): void {
     encoding: 'mulaw',        // G.711 μ-law (the format Telnyx sends)
     sample_rate: '8000',
     channels: '1',
-    interim_results: 'false', // Only fire on complete utterances
+    interim_results: 'true', // Enable interim results for lower perceived latency
     endpointing: '500',       // Fire final transcript after 500ms of silence
     smart_format: 'true',
   });
@@ -101,8 +101,6 @@ export function initDeepgramSession(callControlId: string): void {
       if (msgType !== 'Results') return;
 
       const isFinal = msg.is_final as boolean | undefined;
-      if (!isFinal) return;
-
       const channel = (msg.channel as Record<string, unknown> | undefined);
       const alternatives = channel?.alternatives as Array<Record<string, unknown>> | undefined;
       const transcript = (alternatives?.[0]?.transcript as string | undefined) ?? '';
@@ -111,18 +109,30 @@ export function initDeepgramSession(callControlId: string): void {
       if (!transcript.trim()) return;
 
       // PHI — never log the actual text
-      console.info(JSON.stringify({
-        level: 'info',
-        service: LOG,
-        message: 'Final transcript from Deepgram',
-        callControlId,
-        charCount: transcript.length,
-        confidence,
-      }));
+      if (isFinal) {
+        console.info(JSON.stringify({
+          level: 'info',
+          service: LOG,
+          message: 'Final transcript from Deepgram',
+          callControlId,
+          charCount: transcript.length,
+          confidence,
+        }));
+      } else {
+        // Log interim transcript event (no text)
+        console.debug(JSON.stringify({
+          level: 'debug',
+          service: LOG,
+          message: 'Interim transcript from Deepgram',
+          callControlId,
+          charCount: transcript.length,
+        }));
+      }
 
       const cb = transcriptCallbacks.get(callControlId);
       if (cb) {
-        cb(transcript, confidence);
+        // For interim, pass confidence 0.5 (or actual if available)
+        cb(transcript, isFinal ? confidence : 0.5);
       }
     } catch {
       // Ignore malformed messages

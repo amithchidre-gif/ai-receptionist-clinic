@@ -23,11 +23,90 @@ const INWORLD_TTS_URL = 'https://api.inworld.ai/tts/v1/voice:stream';
 // Saves ~1-2s per cached call.
 // ---------------------------------------------------------------------------
 const TTS_CACHE = new Map<string, Buffer>();
-const TTS_CACHE_MAX = 60;
+const TTS_CACHE_MAX = 80;
 
 function ttsCacheKey(text: string, voiceId: string): string {
   return `${voiceId}::${text.trim()}`;
 }
+
+// ---------------------------------------------------------------------------
+// Static phrases to pre-synthesise on server startup so first-call latency
+// is the same as all subsequent calls (~zero TTS wait for these responses).
+// ---------------------------------------------------------------------------
+const WARMUP_PHRASES: string[] = [
+  'Sure, I can help with that. First I need to verify your identity. May I have your full name?',
+  'Could you please tell me your full name? For example, you can say "My name is John Smith."',
+  'And your date of birth?',
+  'Got it. And your phone number?',
+  'Let me connect you with a staff member. Please hold.',
+  'And your last name?',
+  'Could you please tell me your last name?',
+  'I apologize — could you please tell me your first name?',
+  'I apologize — could you please tell me your last name?',
+  'I need your date of birth. You can say it like "January 15, 1990" or "01/15/1990".',
+  'Could you please provide your phone number? For example, "555-123-4567".',
+  'What date works for you? You can say something like "next Tuesday" or "April 9th".',
+  'What time works best for you? For example, "10am" or "2:30 PM".',
+  'What time works best for you?',
+  'No problem. What date would you prefer instead?',
+  'How can I help you today?',
+  "I'm sorry, I didn't quite understand. Could you tell me how I can help you? For example, would you like to book, cancel, or reschedule an appointment?",
+  'Thank you for calling. Goodbye!',
+  'Let me connect you with a staff member who can better assist you. Please hold.',
+  'Is there anything else I can help you with?',
+  'Is there anything else I can help you with today?',
+  'Sure, how else can I help you?',
+  "Your appointment has been cancelled. Is there anything else I can help you with?",
+  "Let's reschedule your appointment. What new date works for you?",
+  'Your appointment is already confirmed. Is there anything else I can help you with?',
+  "I'm having trouble verifying your information. Let me connect you with a staff member.",
+  'One moment please.',
+  "I can try to answer your question, but for detailed information, a staff member would be better. Could you tell me more about what you need?",
+  'Please say yes or no.',
+  'Thank you. I have verified your identity. What date works for you?',
+  'What date works for you? You can say something like "next Tuesday" or "April 9th".',
+];
+
+/**
+ * Pre-synthesise all static phrases into the TTS cache at server startup.
+ * Non-blocking — errors are swallowed so startup is never delayed.
+ * Call this once after the server is listening.
+ */
+export async function warmTtsCache(): Promise<void> {
+  const apiKey = config.inworldApiKey;
+  if (!apiKey) {
+    console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS warm-up skipped — INWORLD_API_KEY not set' }));
+    return;
+  }
+
+  const voiceId = config.inworldVoiceId;
+  const toWarm = WARMUP_PHRASES.filter(p => !TTS_CACHE.has(ttsCacheKey(p, voiceId)));
+
+  if (toWarm.length === 0) {
+    console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS warm-up skipped — all phrases already cached' }));
+    return;
+  }
+
+  console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS cache warm-up started', phraseCount: toWarm.length }));
+
+  // Process in batches of 3 to avoid overwhelming Inworld API
+  const BATCH = 3;
+  let warmed = 0;
+  for (let i = 0; i < toWarm.length; i += BATCH) {
+    const batch = toWarm.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (phrase) => {
+      try {
+        await synthesize({ text: phrase, sessionId: 'warmup', clinicId: 'warmup' });
+        warmed++;
+      } catch {
+        // Silently skip phrases that fail to pre-warm
+      }
+    }));
+  }
+
+  console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS cache warm-up complete', warmed, total: toWarm.length }));
+}
+
 
 export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
   const { text, sessionId, clinicId } = params;

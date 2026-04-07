@@ -72,6 +72,7 @@ import voiceRoutes from './routes/voice';
 import audioRoutes from './routes/audio';
 import { handleTelnyxAudioStream } from './routes/wsStream';
 import { startReminderScheduler } from './services/reminderScheduler';
+import { warmTtsCache } from './voice/tts/ttsService';
 
 app.use('/api/auth', authRoutes);
 app.use('/api/appointments', appointmentRoutes);
@@ -150,4 +151,9 @@ httpServer.listen(PORT, () => {
   }));
 
   startReminderScheduler();
+
+  // Pre-warm TTS cache with common static phrases — non-blocking
+  warmTtsCache().catch((err: Error) => {
+    console.warn(JSON.stringify({ level: 'warn', service: 'server', message: 'TTS warm-up error', error: err?.message }));
+  });
 });

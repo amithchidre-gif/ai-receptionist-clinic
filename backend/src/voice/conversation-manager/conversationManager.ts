@@ -105,11 +105,64 @@ const VALID_INTENTS: IntentType[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Natural spelling detection — converts "A-M-I-T" or "A M I T" to "Amit"
+// ---------------------------------------------------------------------------
+
+const PHONETIC_REVERSE: Record<string, string> = {
+  alpha: 'A', bravo: 'B', charlie: 'C', delta: 'D', echo: 'E',
+  foxtrot: 'F', golf: 'G', hotel: 'H', india: 'I', juliet: 'J',
+  kilo: 'K', lima: 'L', mike: 'M', november: 'N', oscar: 'O',
+  papa: 'P', quebec: 'Q', romeo: 'R', sierra: 'S', tango: 'T',
+  uniform: 'U', victor: 'V', whiskey: 'W', 'x-ray': 'X', yankee: 'Y', zulu: 'Z',
+};
+
+/**
+ * Pre-process a transcript to resolve letter-by-letter spelling into words.
+ * Handles:
+ *   "A-M-I-T" or "A.M.I.T"             → "Amit"
+ *   "A M I T" (3+ consecutive single)  → "Amit"
+ *   "A as in Alpha, M as in Mike …"    → "Amit"
+ */
+export function preprocessSpelledLetters(text: string): string {
+  let result = text.trim();
+
+  // Step 1 — NATO phonetic: "X as in Word" → letter, e.g. "A as in Alpha" → "A"
+  result = result.replace(
+    /\b([A-Za-z]) as in ([A-Za-z]+(?:-[A-Za-z]+)?)\b/gi,
+    (_m, letter: string, phonetic: string) =>
+      PHONETIC_REVERSE[phonetic.toLowerCase()] ?? letter.toUpperCase(),
+  );
+
+  // Step 2 — Dash or dot separated single letters (3+ letters): "A-M-I-T" → "Amit"
+  result = result.replace(
+    /\b([A-Za-z])(?:[-.]([A-Za-z])){2,}\b/g,
+    (match: string) => {
+      const chars = match.split(/[-.]/).map((c: string) => c.toUpperCase());
+      return chars[0] + chars.slice(1).map((c: string) => c.toLowerCase()).join('');
+    },
+  );
+
+  // Step 3 — Space-separated single uppercase letters (3+): "A M I T" → "Amit"
+  // Requires capitalized letters — Deepgram smart_format uppercases individually spoken letters.
+  result = result.replace(
+    /\b([A-Z] ){2,}[A-Z]\b/g,
+    (match: string) => {
+      const chars = match.trim().split(' ');
+      return chars[0] + chars.slice(1).map((c: string) => c.toLowerCase()).join('');
+    },
+  );
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Keyword-based extraction fallback (runs when LLM is unavailable)
 // ---------------------------------------------------------------------------
 
 function keywordExtract(transcript: string): LLMExtracted {
-  const t = transcript.toLowerCase();
+  // Resolve any letter-by-letter spelling before regex matching
+  const preprocessed = preprocessSpelledLetters(transcript);
+  const t = preprocessed.toLowerCase();
   const result: LLMExtracted = { ...LLM_EXTRACTED_DEFAULT };
 
   // Intent detection
@@ -132,8 +185,8 @@ function keywordExtract(transcript: string): LLMExtracted {
   result.isNo = /\b(no|nope|nah|wrong|incorrect|not right|that's wrong)\b/.test(t);
   result.isGoodbye = /\b(goodbye|bye|thank you|thanks|that's all|that's it|all set|nothing else|no thanks|we're done|i'm done)\b/.test(t);
 
-  // Name: "my name is X Y", "I am X Y", "I'm X", "this is X Y"
-  const nameMatch = transcript.match(
+  // Name: "my name is X Y", "I am X Y", "I'm X", "this is X Y" — use preprocessed for spelling
+  const nameMatch = preprocessed.match(
     /(?:my name is|i am|i'm|this is|name's)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
   );
   if (nameMatch) {
@@ -145,7 +198,7 @@ function keywordExtract(transcript: string): LLMExtracted {
   }
 
   // Phone: 10 consecutive digits
-  const phoneDigits = transcript.replace(/[-.()\s]/g, '');
+  const phoneDigits = preprocessed.replace(/[-.()\s]/g, '');
   const phoneMatch = phoneDigits.match(/\b(\d{10})\b/);
   if (phoneMatch) result.phone = phoneMatch[1];
 
@@ -221,6 +274,9 @@ async function extractWithLLM(
 ): Promise<LLMExtracted> {
   if (!transcript.trim()) return { ...LLM_EXTRACTED_DEFAULT };
 
+  // Resolve letter-by-letter spelling before LLM call — converts "A-M-I-T" → "Amit"
+  const processedTranscript = preprocessSpelledLetters(transcript);
+
   const apiKey = config.openrouterApiKey;
   if (!apiKey) {
     console.error(JSON.stringify({ level: 'error', service: 'conversationManager', message: 'OPENAI_API_KEY not set — using keyword fallback', sessionId, clinicId }));
@@ -235,7 +291,7 @@ Return ONLY valid JSON — no explanation, no markdown, no code blocks.
 
 Fields to extract:
 - intent: one of "book_appointment", "cancel_appointment", "reschedule_appointment", "clinic_question", "unknown", or null
-- name: full patient name as spoken (title-case each word), or null
+- name: full patient name as spoken (title-case each word), or null. If the caller spells out letters (e.g., "A-M-I-T", "A M I T", or phonetics like "A as in Alpha, M as in Mike"), reconstruct as the full word (e.g., "Amit")
 - phone: 10 US digits only (no spaces, dashes, parens), or null. Handle spoken forms: "triple 3" = "333", "double 5" = "55", "five five five one two three four five six seven" = "5551234567"
 - dateOfBirth: date of birth normalized to "MM/DD/YYYY". Handle ALL formats: "March 30, 1985"→"03/30/1985", "March 30th 1985"→"03/30/1985", "30 March 1985"→"03/30/1985", "30th of March 1985"→"03/30/1985", "3/30/85"→"03/30/1985", "03/30/1985"→"03/30/1985", "1985-03-30"→"03/30/1985". Return null only if completely absent.
 - bookingDate: desired appointment date as "YYYY-MM-DD" (compute from today ${today} if relative, e.g. "next Tuesday", "Thursday April 9th", "tomorrow"), or null
@@ -250,21 +306,24 @@ Always return ALL fields. Use null for missing strings, false for missing boolea
   const openai = getOpenAIClient(apiKey);
 
   try {
-    const response = await openai.chat.completions.create(
-      {
-        model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: transcript },
-        ],
-        temperature: 0.0,
-        max_tokens: 200,
-      },
-      { timeout: 6000 },
-    );
+    let content = '';
+    const stream = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: processedTranscript },
+      ],
+      temperature: 0.0,
+      max_tokens: 200,
+      stream: true,
+    });
 
-    const content = (response.choices[0]?.message?.content ?? '').trim()
-      .replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    for await (const chunk of stream) {
+      const delta = chunk.choices?.[0]?.delta?.content;
+      if (delta) content += delta;
+    }
+
+    content = content.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '');
 
     const parsed = JSON.parse(content) as Record<string, unknown>;
 
@@ -1220,16 +1279,14 @@ export async function runPipelineTurn(
     turnCount: session.turnCount,
   }));
 
-  // 7. Save session to DB
-  await saveSessionToDB(session);
-
-  // 8. Synthesize TTS
+  // 7 + 8. Parallel: save session to DB AND synthesize TTS simultaneously
+  // Previously these were sequential — parallelising saves 100-300ms per turn.
   let ttsResult: TtsResult | null = null;
-  try {
-    ttsResult = await synthesize({ text: responseText, sessionId, clinicId });
-  } catch {
-    // TTS failure is non-fatal
-  }
+  const [ttsResultOrNull] = await Promise.all([
+    synthesize({ text: responseText, sessionId, clinicId }).catch(() => null),
+    saveSessionToDB(session).catch(() => undefined),
+  ]);
+  ttsResult = ttsResultOrNull;
 
   const t4 = Date.now(); // TTS complete
 
