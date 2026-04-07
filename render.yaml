@@ -24,10 +24,10 @@ services:
         value: "2924471882994419034"
       - key: DEEPGRAM_API_KEY
         value: 5392be4d98921642de6b917f1538312082a3fae4
-      - key: OPENROUTER_API_KEY
-        value: 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
-      - key: OPENROUTER_MODEL
-        value: openai/gpt-4o-mini
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
       - key: INWORLD_API_KEY
         value: cTJqVWFrQzVtQ1ZDRjB2eU9hYWRzRGRwRlVPQk5aaEU6SWxEZVc1OTROVEJpRDVvWWEzQWtFQjRYZ0U2akR3UnIwaXRCUHNvOHhYSXJDNXJ3U29TeDA2NWRmNjRzcE00OA==
       - key: INWORLD_VOICE_ID

@@ -46,7 +46,7 @@ const recommended = [
   "TELNYX_API_KEY",
   "DEEPGRAM_API_KEY",
   "INWORLD_API_KEY",
-  "OPENROUTER_API_KEY",
+  "OPENAI_API_KEY",
   "FRONTEND_URL",
 ];
 
@@ -68,8 +68,8 @@ export const config = {
   deepgramApiKey: process.env.DEEPGRAM_API_KEY ?? '',
   inworldApiKey: process.env.INWORLD_API_KEY ?? '',
   inworldVoiceId: process.env.INWORLD_VOICE_ID ?? 'Ashley',
-  openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
-  openrouterModel: process.env.OPENROUTER_MODEL ?? 'openai/gpt-4o-mini',
+  openrouterApiKey: process.env.OPENAI_API_KEY ?? '',
+  openrouterModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
   googleApplicationCredentials: process.env.GOOGLE_APPLICATION_CREDENTIALS ?? '',
   frontendUrl: process.env.FRONTEND_URL ?? 'http://localhost:3000',
   baseUrl: process.env.BASE_URL ?? 'http://localhost:4000',

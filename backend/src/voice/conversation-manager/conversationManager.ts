@@ -213,7 +213,7 @@ async function extractWithLLM(
 
   const apiKey = config.openrouterApiKey;
   if (!apiKey) {
-    console.error(JSON.stringify({ level: 'error', service: 'conversationManager', message: 'OPENROUTER_API_KEY not set — using keyword fallback', sessionId, clinicId }));
+    console.error(JSON.stringify({ level: 'error', service: 'conversationManager', message: 'OPENAI_API_KEY not set — using keyword fallback', sessionId, clinicId }));
     return keywordExtract(transcript);
   }
 
@@ -239,7 +239,7 @@ Always return ALL fields. Use null for missing strings, false for missing boolea
 
   const openai = new OpenAI({
     apiKey,
-    baseURL: 'https://openrouter.ai/api/v1',
+    baseURL: 'https://api.openai.com/v1',
   });
 
   try {

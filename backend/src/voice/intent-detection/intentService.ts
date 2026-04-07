@@ -53,13 +53,13 @@ export async function detectIntent(
     return cache.get(cacheKey)!;
   }
 
-  const apiKey = process.env.OPENROUTER_API_KEY || config.openrouterApiKey;
+  const apiKey = process.env.OPENAI_API_KEY || config.openrouterApiKey;
 
   if (!apiKey) {
     console.error(JSON.stringify({
       level: "error",
       service: "intentService",
-      message: "OPENROUTER_API_KEY is not set",
+      message: "OPENAI_API_KEY is not set",
       sessionId,
       clinicId,
     }));
@@ -68,7 +68,7 @@ export async function detectIntent(
 
   const openai = new OpenAI({
     apiKey,
-    baseURL: "https://openrouter.ai/api/v1",
+    baseURL: "https://api.openai.com/v1",
   });
 
   const systemPrompt = `You are an intent classifier for a medical clinic AI receptionist.
