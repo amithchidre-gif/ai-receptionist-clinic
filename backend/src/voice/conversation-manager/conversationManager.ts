@@ -498,13 +498,7 @@ async function processState(
 ): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number; ttsWaitMs: number }> {
   // ─── Greeting (hardcoded — no user input to process yet) ──────────────────────
   if (session.state === 'greeting') {
-    const clinicName = await getClinicName(session.clinicId);
-    const greetings = [
-      `Thank you for calling ${clinicName}! How can I help you today?`,
-      `Hello, ${clinicName}! What can I help you with?`,
-      `Hi there! Thanks for calling ${clinicName}. How can I assist?`,
-    ];
-    const responseText = greetings[Math.floor(Math.random() * greetings.length)];
+    const responseText = `Thanks for calling! How can I help you today?`;
     return { responseText, nextState: 'intent_detection', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
   }
 
@@ -761,7 +755,7 @@ async function confirmBooking(
   }
 
   session.bookingConfirmed = true;
-  const resp = `Your appointment is confirmed for ${rawDate} at ${rawTime}. You will receive a confirmation text message shortly.`;
+  const resp = `Confirmed for ${rawDate} at ${rawTime}! Check your texts.`;
 
   // 3. Fire-and-forget: calendar event + SMS + form link — none of these block the voice response.
   // Captured in closure so the call can return immediately.

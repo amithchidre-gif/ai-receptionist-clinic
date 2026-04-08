@@ -74,6 +74,8 @@ const WARMUP_PHRASES: string[] = [
   'You will receive a confirmation text message shortly.',
   'Could you repeat that please?',
   'I did not catch that. Could you say that again?',
+  // Greeting — must match conversationManager greeting text exactly for cache hit on T1
+  'Thanks for calling! How can I help you today?',
 ];
 
 /**
