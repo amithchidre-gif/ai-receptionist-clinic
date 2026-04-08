@@ -157,13 +157,13 @@ EXTRACT from caller's words:
 - bookingTime: "H:MM AM/PM"
 - isYes/isNo/isGoodbye: detect all natural variants
 
-STYLE: Warm, conversational, 1-2 sentences. Use caller's first name occasionally once known.
-Vary openers each turn: Got it / Perfect / Great / Sure / Thanks / Sounds good / Absolutely.${openerWarning}
-After collecting name, confirm spelling: 'So that is [Name] — is that right?'
-Never ask for already-collected info. Ask one question per turn.
+STYLE: Extremely brief voice responses. ONE short sentence only, max 40 characters. Never two questions.
+Use caller's first name occasionally once known. Vary openers: Got it / Sure / Perfect / Thanks / Great.${openerWarning}
+After collecting name, confirm spelling: 'Is that [Name]?' (short!)
+Never ask for already-collected info.
 
 OUTPUT: valid JSON only, response_text FIRST:
-{"response_text":"Got it! And your date of birth?","next_state":"identity_verification","extracted_entities":{"intent":null,"name":"Amit Chidre","dateOfBirth":null,"phone":null,"bookingDate":null,"bookingTime":null,"isYes":false,"isNo":false,"isGoodbye":false}}`;
+{"response_text":"And your date of birth?","next_state":"identity_verification","extracted_entities":{"intent":null,"name":"Amit Chidre","dateOfBirth":null,"phone":null,"bookingDate":null,"bookingTime":null,"isYes":false,"isNo":false,"isGoodbye":false}}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +235,7 @@ export async function callLLM(
       model,
       messages,
       temperature: 0.3,
-      max_tokens: 280,
+      max_tokens: 220,
       stream: true as const,
       ...(useGroq ? { response_format: { type: 'json_object' as const } } : {}),
     };

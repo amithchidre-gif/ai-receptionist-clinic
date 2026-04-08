@@ -494,7 +494,7 @@ async function updateCallLogStatus(
 async function processState(
   session: ConversationSession,
   transcript: string
-): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number }> {
+): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number; ttsWaitMs: number }> {
   // ─── Greeting (hardcoded — no user input to process yet) ──────────────────────
   if (session.state === 'greeting') {
     const clinicName = await getClinicName(session.clinicId);
@@ -504,7 +504,7 @@ async function processState(
       `Hi there! Thanks for calling ${clinicName}. How can I assist?`,
     ];
     const responseText = greetings[Math.floor(Math.random() * greetings.length)];
-    return { responseText, nextState: 'intent_detection', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0 };
+    return { responseText, nextState: 'intent_detection', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
   }
 
   // ─── All other states: single LLM call drives response + state + entities ─
@@ -548,6 +548,7 @@ async function processState(
       shouldAutoHangUp: false,
       parallelTtsResult: null,
       llmMs: 0,
+      ttsWaitMs: 0,
     };
   }
 
@@ -645,7 +646,7 @@ async function processState(
     if (session.conversationHistory.length > 6) {
       session.conversationHistory.splice(0, session.conversationHistory.length - 6);
     }
-    return { responseText: confirmResult.responseText, nextState: 'completed', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: llmResult.llmMs };
+    return { responseText: confirmResult.responseText, nextState: 'completed', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: llmResult.llmMs, ttsWaitMs: 0 };
   }
 
   // ── 4. Track failed attempts — escalate to handoff after 5 stuck turns ────
@@ -660,6 +661,7 @@ async function processState(
           shouldAutoHangUp: false,
           parallelTtsResult: null,
           llmMs: llmResult.llmMs,
+          ttsWaitMs: 0,
         };
       }
     } else {
@@ -679,13 +681,15 @@ async function processState(
   const shouldAutoHangUp = (e.isGoodbye || false) && (nextState === 'handoff' || nextState === 'completed');
 
   // Await parallel TTS (started during LLM streaming — likely already done)
+  const ttsWaitStart = Date.now();
   const parallelTtsResult: TtsResult | null = ttsPromise ? await ttsPromise : null;
+  const ttsWaitMs = ttsPromise ? Date.now() - ttsWaitStart : 0;
 
   // Track opener word so the LLM avoids repeating the same opener next turn
   const firstWord = responseText.split(/\s+/)[0].replace(/[.,!?]/g, '').toLowerCase();
   session.lastResponseOpener = firstWord || null;
 
-  return { responseText, nextState, shouldAutoHangUp, parallelTtsResult, llmMs: llmResult.llmMs };
+  return { responseText, nextState, shouldAutoHangUp, parallelTtsResult, llmMs: llmResult.llmMs, ttsWaitMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -876,7 +880,7 @@ export async function runPipelineTurn(
 
   // 4. State machine
   const previousState = session.state;
-  const { responseText, nextState, shouldAutoHangUp, parallelTtsResult, llmMs } = await processState(session, transcript);
+  const { responseText, nextState, shouldAutoHangUp, parallelTtsResult, llmMs, ttsWaitMs } = await processState(session, transcript);
   session.state = nextState;
 
   const t3 = Date.now(); // state machine + response build complete
@@ -918,8 +922,9 @@ export async function runPipelineTurn(
     turn: session.turnCount,
     stt_ms: t1 - t0,
     llm_ms: llmMs,
-    logic_ms: t3 - t2 - llmMs,
-    tts_ms: t4 - t3,
+    tts_wait_ms: ttsWaitMs,        // time waiting for parallel TTS after LLM returned
+    logic_ms: t3 - t2 - llmMs - ttsWaitMs,  // pure state-machine + DB overhead
+    tts_serial_ms: t4 - t3,        // sequential TTS (0 when parallel TTS was used)
     total_ms: t4 - t0,
     state: session.state,
   }));
