@@ -77,4 +77,7 @@ export const config = {
   port: parseInt(process.env.PORT ?? '4000', 10),
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
   nodeEnv: process.env.NODE_ENV ?? 'development',
+  // HIPAA opt-in: set STORE_TRANSCRIPTS=true to persist transcript_text/response_text
+  // in conversation_turns. Latency columns are always stored regardless of this flag.
+  storeTranscripts: process.env.STORE_TRANSCRIPTS === 'true',
 };

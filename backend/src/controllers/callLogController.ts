@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { query } from '../config/db';
 import { sendSuccess, sendError } from '../middleware/responseHelpers';
+import { getTurnsByCallLogId } from '../models/conversationTurnModel';
 
 export async function listCallLogs(req: Request, res: Response): Promise<void> {
   const { clinicId } = req.user!;
@@ -33,5 +34,19 @@ export async function listCallLogs(req: Request, res: Response): Promise<void> {
     const error = err as Error;
     console.error(JSON.stringify({ level: 'error', service: 'callLogController', message: 'listCallLogs failed', clinicId, error: error.message, timestamp: new Date().toISOString() }));
     sendError(res, 'Failed to fetch call logs', 500);
+  }
+}
+
+export async function getCallLogTurns(req: Request, res: Response): Promise<void> {
+  const { clinicId } = req.user!;
+  const { id } = req.params;
+
+  try {
+    const turns = await getTurnsByCallLogId(id, clinicId);
+    sendSuccess(res, turns);
+  } catch (err: unknown) {
+    const error = err as Error;
+    console.error(JSON.stringify({ level: 'error', service: 'callLogController', message: 'getCallLogTurns failed', clinicId, callLogId: id, error: error.message, timestamp: new Date().toISOString() }));
+    sendError(res, 'Failed to fetch turns', 500);
   }
 }

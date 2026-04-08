@@ -10,6 +10,7 @@ import { createAppointment } from '../../models/appointmentModel';
 import { upsertPatient } from '../../models/patientModel';
 import { getSettingsByClinicId } from '../../models/settingsModel';
 import { sendConfirmationSms, sendFormLinkSms } from '../../services/smsService';
+import { insertConversationTurn } from '../../models/conversationTurnModel';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -928,6 +929,25 @@ export async function runPipelineTurn(
     total_ms: t4 - t0,
     state: session.state,
   }));
+
+  // 9. Fire-and-forget: persist turn to DB for dashboard debugging.
+  // transcript_text / response_text are PHI — only stored when STORE_TRANSCRIPTS=true.
+  const logicMs = t3 - t2 - llmMs - ttsWaitMs;
+  insertConversationTurn({
+    callLogId: session.callLogId,
+    clinicId: session.clinicId,
+    sessionId,
+    turnNumber: session.turnCount,
+    state: session.state,
+    transcriptText: config.storeTranscripts ? transcript : null,
+    responseText: config.storeTranscripts ? responseText : null,
+    sttMs: t1 - t0,
+    llmMs,
+    ttsWaitMs,
+    logicMs,
+    ttsSerialMs: t4 - t3,
+    totalMs: t4 - t0,
+  }).catch(() => undefined);
 
   session.latencies.push(t4 - t0);
 
