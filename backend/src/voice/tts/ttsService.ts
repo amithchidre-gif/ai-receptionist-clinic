@@ -13,9 +13,9 @@ interface SynthesizeParams {
   clinicId: string;
 }
 
-// Inworld TTS streaming endpoint — returns NDJSON lines:
-//   {"result":{"audio":"<base64_mp3>"},"error":null}
-const INWORLD_TTS_URL = 'https://api.inworld.ai/tts/v1/voice:stream';
+// Cartesia Sonic-3 bytes endpoint — returns raw MP3 binary
+const CARTESIA_TTS_URL = 'https://api.cartesia.ai/tts/bytes';
+const CARTESIA_VERSION = '2024-06-10';
 
 // ---------------------------------------------------------------------------
 // TTS response cache — avoids re-synthesising identical static phrases.
@@ -84,13 +84,13 @@ const WARMUP_PHRASES: string[] = [
  * Call this once after the server is listening.
  */
 export async function warmTtsCache(): Promise<void> {
-  const apiKey = config.inworldApiKey;
+  const apiKey = config.cartesiaApiKey;
   if (!apiKey) {
-    console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS warm-up skipped — INWORLD_API_KEY not set' }));
+    console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS warm-up skipped — CARTESIA_API_KEY not set' }));
     return;
   }
 
-  const voiceId = config.inworldVoiceId;
+  const voiceId = config.cartesiaVoiceId;
   const toWarm = WARMUP_PHRASES.filter(p => !TTS_CACHE.has(ttsCacheKey(p, voiceId)));
 
   if (toWarm.length === 0) {
@@ -122,8 +122,8 @@ export async function warmTtsCache(): Promise<void> {
 export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
   const { text, sessionId, clinicId } = params;
 
-  const apiKey = config.inworldApiKey;
-  const voiceId = config.inworldVoiceId;
+  const apiKey = config.cartesiaApiKey;
+  const voiceId = config.cartesiaVoiceId;
 
   // Return cached audio for phrases — raised ceiling to 500 chars to cover longer dynamic responses
   if (text.length < 500) {
@@ -141,7 +141,7 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
       event: 'tts_config_error',
       sessionId,
       clinicId,
-      error: 'INWORLD_API_KEY is not set',
+      error: 'CARTESIA_API_KEY is not set',
     }));
     return { audioBuffer: null, text };
   }
@@ -150,11 +150,11 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
   console.log(JSON.stringify({
     level: 'debug',
     service: 'ttsService',
-    provider: 'inworld',
+    provider: 'cartesia',
     message: 'TTS request',
     voiceId,
-    modelId: 'inworld-tts-1.5-max',
-    apiKeyPrefix: apiKey.substring(0, 6) + '...',
+    modelId: 'sonic-3',
+    apiKeyPrefix: apiKey.substring(0, 10) + '...',
     apiKeyLength: apiKey.length,
     textLength: text.length,
     sessionId,
@@ -165,68 +165,32 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
 
   try {
     const response = await axios.post(
-      INWORLD_TTS_URL,
+      CARTESIA_TTS_URL,
       {
-        text,
-        voice_id: voiceId,
-        audio_config: { audio_encoding: 'MP3' },
-        model_id: 'inworld-tts-1.5-max',
+        model_id: 'sonic-3',
+        transcript: text,
+        voice: {
+          mode: 'id',
+          id: voiceId,
+        },
+        output_format: {
+          container: 'mp3',
+          encoding: 'mp3',
+          sample_rate: 22050,
+        },
       },
       {
         headers: {
-          Authorization: `Basic ${apiKey}`,
+          'X-API-Key': apiKey,
+          'Cartesia-Version': CARTESIA_VERSION,
           'Content-Type': 'application/json',
         },
-        responseType: 'stream',
+        responseType: 'arraybuffer',
         timeout: 10000,
       }
     );
 
-    // Collect streaming NDJSON chunks and decode base64 audio segments
-    const audioChunks: Buffer[] = [];
-
-    await new Promise<void>((resolve, reject) => {
-      let partial = '';
-
-      response.data.on('data', (chunk: Buffer) => {
-        partial += chunk.toString('utf8');
-        const lines = partial.split('\n');
-        partial = lines.pop() ?? '';  // keep incomplete trailing line
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            const parsed = JSON.parse(trimmed);
-            if (parsed.error) {
-              reject(new Error(`Inworld TTS error: ${JSON.stringify(parsed.error)}`));
-              return;
-            }
-            const b64 = parsed?.result?.audioContent as string | undefined;
-            if (b64) audioChunks.push(Buffer.from(b64, 'base64'));
-          } catch {
-            // non-JSON line — skip
-          }
-        }
-      });
-
-      response.data.on('end', () => {
-        // Flush any remaining buffered line
-        const trimmed = partial.trim();
-        if (trimmed) {
-          try {
-            const parsed = JSON.parse(trimmed);
-            const b64 = parsed?.result?.audioContent as string | undefined;
-            if (b64) audioChunks.push(Buffer.from(b64, 'base64'));
-          } catch { /* ignore */ }
-        }
-        resolve();
-      });
-
-      response.data.on('error', (err: Error) => reject(err));
-    });
-
-    const audioBuffer = Buffer.concat(audioChunks);
+    const audioBuffer = Buffer.from(response.data as ArrayBuffer);
     const durationMs = Date.now() - start;
 
     // Cache all synthesised audio (ceiling raised to 500 chars)
@@ -243,7 +207,7 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
     console.log(JSON.stringify({
       level: 'info',
       event: 'tts_synthesized',
-      provider: 'inworld',
+      provider: 'cartesia',
       sessionId,
       clinicId,
       durationMs,
@@ -264,13 +228,13 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
     console.error(JSON.stringify({
       level: 'error',
       event: 'tts_synthesis_failed',
-      provider: 'inworld',
+      provider: 'cartesia',
       sessionId,
       clinicId,
       status,
       ...(status === 401 && {
-        hint: 'Inworld 401 — check INWORLD_API_KEY is a valid Basic auth token (base64 of client_id:client_secret)',
-        apiKeyPrefix: apiKey.substring(0, 6) + '...',
+        hint: 'Cartesia 401 — check CARTESIA_API_KEY is correct (starts with sk_car_)',
+        apiKeyPrefix: apiKey.substring(0, 10) + '...',
         apiKeyLength: apiKey.length,
         responseBody,
       }),
