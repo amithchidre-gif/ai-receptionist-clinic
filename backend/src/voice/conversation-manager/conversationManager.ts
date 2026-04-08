@@ -641,7 +641,7 @@ async function processState(
     if (session.conversationHistory.length > 6) {
       session.conversationHistory.splice(0, session.conversationHistory.length - 6);
     }
-    return { responseText: confirmResult.responseText, nextState: 'completed', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: llmResult.llmMs, ttsWaitMs: 0 };
+    return { responseText: confirmResult.responseText, nextState: 'completed', shouldAutoHangUp: true, parallelTtsResult: confirmResult.ttsResult, llmMs: llmResult.llmMs, ttsWaitMs: 0 };
   }
 
   // ── 4. Track failed attempts — escalate to handoff after 5 stuck turns ────
@@ -708,13 +708,35 @@ export function resolveBookingTime(timeStr: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Date formatter — converts ISO "YYYY-MM-DD" to spoken English "Wednesday, April 9th"
+// ---------------------------------------------------------------------------
+
+function formatDateForSpeech(isoDate: string): string {
+  const [year, month, day] = isoDate.split('-').map(Number);
+  // Construct in local time to avoid UTC offset shifting the day
+  const date = new Date(year, month - 1, day);
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const monthNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  const d = day;
+  const suffix = (d >= 11 && d <= 13) ? 'th'
+    : d % 10 === 1 ? 'st'
+    : d % 10 === 2 ? 'nd'
+    : d % 10 === 3 ? 'rd'
+    : 'th';
+  return `${dayNames[date.getDay()]}, ${monthNames[date.getMonth()]} ${d}${suffix}`;
+}
+
+// ---------------------------------------------------------------------------
 // Shared booking confirmation logic (used by booking_flow + awaiting_time)
 // ---------------------------------------------------------------------------
 
 async function confirmBooking(
   session: ConversationSession,
   _transcript: string
-): Promise<{ responseText: string; nextState: ConversationState }> {
+): Promise<{ responseText: string; nextState: ConversationState; ttsResult: TtsResult | null }> {
   const clinicId = session.clinicId;
   const rawDate = session.bookingDate!;  // already ISO "YYYY-MM-DD" from LLM
   const rawTime = session.bookingTime!;
@@ -755,7 +777,11 @@ async function confirmBooking(
   }
 
   session.bookingConfirmed = true;
-  const resp = `Confirmed for ${rawDate} at ${rawTime}! Check your texts.`;
+  const humanDate = formatDateForSpeech(rawDate);
+  const resp = `Booked! ${humanDate} at ${rawTime}. A confirmation text is on its way. Goodbye!`;
+
+  // Start TTS immediately — runs in parallel with DB appointment creation and background tasks
+  const ttsPromise = synthesize({ text: resp, sessionId: session.sessionId, clinicId }).catch(() => null);
 
   // 3. Fire-and-forget: calendar event + SMS + form link — none of these block the voice response.
   // Captured in closure so the call can return immediately.
@@ -805,7 +831,8 @@ async function confirmBooking(
     }
   });
 
-  return { responseText: resp, nextState: 'completed' };
+  const ttsResult = await ttsPromise;
+  return { responseText: resp, nextState: 'completed', ttsResult };
 }
 
 // ---------------------------------------------------------------------------

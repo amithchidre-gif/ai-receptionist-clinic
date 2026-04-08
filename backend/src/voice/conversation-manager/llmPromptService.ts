@@ -143,10 +143,14 @@ State: ${ctx.state} | Turn: ${ctx.turnCount + 1} | Attempts: ${ctx.verificationA
 Collected: ${collected}
 Identity verified: ${ctx.identityVerified ? 'YES' : 'NO'} | Booking confirmed: ${ctx.bookingConfirmed ? 'YES' : 'NO'}
 
-STATES: greeting→intent_detection→identity_verification→booking_flow→awaiting_time→completed | handoff
+STATES: greeting→intent_detection→identity_verification→booking_flow→awaiting_date→awaiting_time→completed | handoff
 RULES:
 - Stay in identity_verification until name+dob+phone ALL collected. Then: book/reschedule→booking_flow, cancel→completed.
-- booking_flow→awaiting_time once date known. awaiting_time→completed only on isYes.
+- booking_flow→awaiting_date: ask "What date and time works for you?"
+- awaiting_date: once bookingDate extracted → awaiting_time; ask "And what time? E.g., 10 AM."
+- awaiting_time: once BOTH date+time known, ask confirmation using natural date: "Is [Day Month Nth] at [Time] correct?" Stay awaiting_time until isYes.
+- On isYes in awaiting_time: set next_state to awaiting_time (server handles booking + goodbye automatically).
+- NEVER write a date as "YYYY-MM-DD". Always say it naturally: "Wednesday April 9th", "Monday March 2nd".
 - handoff after 5+ failed attempts or caller asks for a person.
 
 EXTRACT from caller's words:
@@ -235,7 +239,7 @@ export async function callLLM(
       model,
       messages,
       temperature: 0.3,
-      max_tokens: 220,
+      max_tokens: 130,
       stream: true as const,
       ...(useGroq ? { response_format: { type: 'json_object' as const } } : {}),
     };
