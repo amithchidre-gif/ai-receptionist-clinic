@@ -1,4 +1,4 @@
-import axios from 'axios';
+﻿import axios from 'axios';
 import { config } from '../../config/env';
 
 export interface TtsResult {
@@ -16,6 +16,75 @@ interface SynthesizeParams {
 // Cartesia Sonic-3 bytes endpoint — returns raw MP3 binary
 const CARTESIA_TTS_URL = 'https://api.cartesia.ai/tts/bytes';
 const CARTESIA_VERSION = '2024-06-10';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Low-level Cartesia HTTP call with 429-aware exponential backoff retry.
+ * @param maxRetries  - how many times to retry after 429 (0 = no retry)
+ * @param baseDelayMs - first retry delay; doubles each attempt (capped at 30 s)
+ */
+async function cartesiaRequest(
+  text: string,
+  apiKey: string,
+  voiceId: string,
+  maxRetries: number,
+  baseDelayMs: number,
+): Promise<Buffer> {
+  let attempt = 0;
+  while (true) {
+    try {
+      const response = await axios.post(
+        CARTESIA_TTS_URL,
+        {
+          model_id: 'sonic-3',
+          transcript: text,
+          voice: { mode: 'id', id: voiceId },
+          output_format: { container: 'mp3', encoding: 'mp3', sample_rate: 22050 },
+        },
+        {
+          headers: {
+            'X-API-Key': apiKey,
+            'Cartesia-Version': CARTESIA_VERSION,
+            'Content-Type': 'application/json',
+          },
+          responseType: 'arraybuffer',
+          timeout: 10000,
+        }
+      );
+      return Buffer.from(response.data as ArrayBuffer);
+    } catch (err: unknown) {
+      const axiosErr = err as import('axios').AxiosError;
+      const status = axiosErr?.response?.status;
+
+      if (status === 429 && attempt < maxRetries) {
+        // Respect Retry-After header if present, else exponential backoff
+        const headers = axiosErr.response?.headers as Record<string, string> | undefined;
+        const retryAfterHeader = headers?.['retry-after'];
+        const backoff = baseDelayMs * Math.pow(2, attempt);
+        const delay = Math.min(
+          retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : backoff,
+          30000,
+        );
+        console.warn(JSON.stringify({
+          level: 'warn',
+          event: 'tts_rate_limited',
+          provider: 'cartesia',
+          attempt: attempt + 1,
+          maxRetries,
+          retryAfterMs: delay,
+        }));
+        await sleep(delay);
+        attempt++;
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // TTS response cache — avoids re-synthesising identical static phrases.
@@ -100,22 +169,38 @@ export async function warmTtsCache(): Promise<void> {
 
   console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS cache warm-up started', phraseCount: toWarm.length }));
 
-  // Process in batches of 5 to pre-warm more phrases concurrently
-  const BATCH = 5;
+  // Batch size 2 + 500 ms inter-batch delay to stay within Cartesia free-tier rate limits.
+  // Each request retries up to 4 times with exponential backoff starting at 1 s.
+  const BATCH = 2;
+  const INTER_BATCH_DELAY_MS = 500;
   let warmed = 0;
+  let failed = 0;
+
   for (let i = 0; i < toWarm.length; i += BATCH) {
     const batch = toWarm.slice(i, i + BATCH);
     await Promise.all(batch.map(async (phrase) => {
       try {
-        await synthesize({ text: phrase, sessionId: 'warmup', clinicId: 'warmup' });
-        warmed++;
+        const audioBuffer = await cartesiaRequest(phrase, apiKey, voiceId, 4, 1000);
+        if (audioBuffer.byteLength > 0) {
+          const cacheKey = ttsCacheKey(phrase, voiceId);
+          if (TTS_CACHE.size >= TTS_CACHE_MAX) {
+            TTS_CACHE.delete(TTS_CACHE.keys().next().value as string);
+          }
+          TTS_CACHE.set(cacheKey, audioBuffer);
+          warmed++;
+        }
       } catch {
-        // Silently skip phrases that fail to pre-warm
+        failed++; // phrase remains uncached; will be synthesised on first use
       }
     }));
+
+    // Pause between batches (skip after last batch)
+    if (i + BATCH < toWarm.length) {
+      await sleep(INTER_BATCH_DELAY_MS);
+    }
   }
 
-  console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS cache warm-up complete', warmed, total: toWarm.length }));
+  console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS cache warm-up complete', warmed, failed, total: toWarm.length }));
 }
 
 
@@ -164,33 +249,8 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
   const start = Date.now();
 
   try {
-    const response = await axios.post(
-      CARTESIA_TTS_URL,
-      {
-        model_id: 'sonic-3',
-        transcript: text,
-        voice: {
-          mode: 'id',
-          id: voiceId,
-        },
-        output_format: {
-          container: 'mp3',
-          encoding: 'mp3',
-          sample_rate: 22050,
-        },
-      },
-      {
-        headers: {
-          'X-API-Key': apiKey,
-          'Cartesia-Version': CARTESIA_VERSION,
-          'Content-Type': 'application/json',
-        },
-        responseType: 'arraybuffer',
-        timeout: 10000,
-      }
-    );
-
-    const audioBuffer = Buffer.from(response.data as ArrayBuffer);
+    // Live calls: 1 retry with 500 ms initial backoff — avoids silent failure on transient 429
+    const audioBuffer = await cartesiaRequest(text, apiKey, voiceId, 1, 500);
     const durationMs = Date.now() - start;
 
     // Cache all synthesised audio (ceiling raised to 500 chars)
@@ -236,6 +296,10 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
         hint: 'Cartesia 401 — check CARTESIA_API_KEY is correct (starts with sk_car_)',
         apiKeyPrefix: apiKey.substring(0, 10) + '...',
         apiKeyLength: apiKey.length,
+        responseBody,
+      }),
+      ...(status === 429 && {
+        hint: 'Cartesia 429 — rate limit hit during live call (already retried once)',
         responseBody,
       }),
       error: (err as Error)?.message ?? 'Unknown TTS error',
