@@ -519,6 +519,7 @@ async function processState(
     identityVerified: session.identityVerified,
     bookingConfirmed: session.bookingConfirmed,
     lastResponseOpener: session.lastResponseOpener,
+    nameConfirmed: session.nameConfirmed,
   };
 
   // Start TTS as soon as response_text is complete in the stream (parallel execution)
@@ -563,10 +564,9 @@ async function processState(
   if (e.intent && (VALID_INTENTS as string[]).includes(e.intent) && !session.intent) {
     session.intent = e.intent as IntentType;
   }
-  if (e.name && !session.collectedData.name) {
+  if (e.name && (!session.collectedData.name || !session.nameConfirmed)) {
     session.collectedData.name = e.name;
-    session.firstNameConfirmed = true;
-    session.nameConfirmed = true;
+    session.nameConfirmed = false;  // awaiting verbal confirmation ("Is that [Name]?")
   }
   if (e.dateOfBirth && !session.collectedData.dateOfBirth) {
     session.collectedData.dateOfBirth = e.dateOfBirth;
@@ -581,11 +581,18 @@ async function processState(
     session.bookingTime = e.bookingTime;
   }
 
+  // Name confirmed when caller says "yes" after AI asks "Is that [Name]?" in identity_verification
+  if (e.isYes && session.collectedData.name && !session.nameConfirmed
+      && session.state === 'identity_verification') {
+    session.nameConfirmed = true;
+  }
+
   // ── 2. Side-effect: patient upsert when identity verification is complete ──
   const hasAllIdentityData =
     session.collectedData.name &&
     session.collectedData.dateOfBirth &&
-    session.collectedData.phone;
+    session.collectedData.phone &&
+    session.nameConfirmed;  // name must be verbally confirmed before leaving verification
   const leavingVerification =
     session.state === 'identity_verification' && nextState !== 'identity_verification';
 
@@ -759,7 +766,14 @@ async function confirmBooking(
     }));
   }
 
-  // 2. Create appointment in DB immediately — needed for appointment ID
+  session.bookingConfirmed = true;
+  const humanDate = formatDateForSpeech(rawDate);
+  const resp = `Booked! ${humanDate} at ${rawTime}. Text sent. Bye!`;
+
+  // Start TTS first — DB write runs in parallel below (~200ms savings)
+  const ttsPromise = synthesize({ text: resp, sessionId: session.sessionId, clinicId }).catch(() => null);
+
+  // 2. Create appointment in DB — in parallel with TTS synthesis above
   if (session.verifiedPatientId) {
     try {
       const appointment = await createAppointment({
@@ -775,13 +789,6 @@ async function confirmBooking(
       console.error(`[confirmBooking] DB appointment creation failed for session=${session.sessionId}, clinic=${clinicId}. Patient was told confirmed.`);
     }
   }
-
-  session.bookingConfirmed = true;
-  const humanDate = formatDateForSpeech(rawDate);
-  const resp = `Booked! ${humanDate} at ${rawTime}. A confirmation text is on its way. Goodbye!`;
-
-  // Start TTS immediately — runs in parallel with DB appointment creation and background tasks
-  const ttsPromise = synthesize({ text: resp, sessionId: session.sessionId, clinicId }).catch(() => null);
 
   // 3. Fire-and-forget: calendar event + SMS + form link — none of these block the voice response.
   // Captured in closure so the call can return immediately.

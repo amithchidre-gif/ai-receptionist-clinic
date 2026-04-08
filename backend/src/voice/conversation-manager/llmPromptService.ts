@@ -44,6 +44,7 @@ export interface LLMCallContext {
   identityVerified: boolean;
   bookingConfirmed: boolean;
   lastResponseOpener: string | null;
+  nameConfirmed: boolean;
 }
 
 export interface LLMExtractedEntities {
@@ -126,7 +127,7 @@ function normalizeDOB(raw: string): string | null {
 function buildSystemPrompt(ctx: LLMCallContext, clinicName: string, today: string): string {
   const cd = ctx.collectedData;
   const collected = [
-    cd.name        ? `name:${cd.name}` : null,
+    cd.name        ? `name:${cd.name}${ctx.nameConfirmed ? '' : '(unconfirmed)'}` : null,
     cd.dateOfBirth ? `dob:${cd.dateOfBirth}` : null,
     cd.phone       ? 'phone:✓' : null,
     ctx.intent     ? `intent:${ctx.intent}` : null,
@@ -141,14 +142,16 @@ function buildSystemPrompt(ctx: LLMCallContext, clinicName: string, today: strin
   return `You are the AI voice receptionist for ${clinicName}. Today: ${today}.
 State: ${ctx.state} | Turn: ${ctx.turnCount + 1} | Attempts: ${ctx.verificationAttempts}
 Collected: ${collected}
-Identity verified: ${ctx.identityVerified ? 'YES' : 'NO'} | Booking confirmed: ${ctx.bookingConfirmed ? 'YES' : 'NO'}
+Identity verified: ${ctx.identityVerified ? 'YES' : 'NO'} | Booking confirmed: ${ctx.bookingConfirmed ? 'YES' : 'NO'} | Name confirmed: ${ctx.nameConfirmed ? 'YES' : 'NO'}
 
 STATES: greeting→intent_detection→identity_verification→booking_flow→awaiting_date→awaiting_time→completed | handoff
 RULES:
-- Stay in identity_verification until name+dob+phone ALL collected. Then: book/reschedule→booking_flow, cancel→completed.
+- identity_verification: name → confirm("Is that [Name]?") → dob → readback("Got it, [Month] [Day] [Year]?") → phone → advance.
+  nameConfirmed=NO in context: MUST ask "Is that [Name]?" before collecting dob. Stay identity_verification.
+  After dob extracted: say "Got it, [Month Day Year]?" and wait for isYes before asking phone.
 - booking_flow→awaiting_date: ask "What date and time works for you?"
 - awaiting_date: once bookingDate extracted → awaiting_time; ask "And what time? E.g., 10 AM."
-- awaiting_time: once BOTH date+time known, ask confirmation using natural date: "Is [Day Month Nth] at [Time] correct?" Stay awaiting_time until isYes.
+- awaiting_time: once BOTH date+time known, ask "Is [Day Date] at [Time] right?" Stay awaiting_time until isYes.
 - On isYes in awaiting_time: set next_state to awaiting_time (server handles booking + goodbye automatically).
 - NEVER write a date as "YYYY-MM-DD". Always say it naturally: "Wednesday April 9th", "Monday March 2nd".
 - handoff after 5+ failed attempts or caller asks for a person.
@@ -163,8 +166,7 @@ EXTRACT from caller's words:
 
 STYLE: Extremely brief voice responses. ONE short sentence only, max 40 characters. Never two questions.
 Use caller's first name occasionally once known. Vary openers: Got it / Sure / Perfect / Thanks / Great.${openerWarning}
-After collecting name, confirm spelling: 'Is that [Name]?' (short!)
-Never ask for already-collected info.
+Never ask for already-collected info. One action per turn (confirm name OR ask dob, not both).
 
 OUTPUT: valid JSON only, response_text FIRST:
 {"response_text":"And your date of birth?","next_state":"identity_verification","extracted_entities":{"intent":null,"name":"Amit Chidre","dateOfBirth":null,"phone":null,"bookingDate":null,"bookingTime":null,"isYes":false,"isNo":false,"isGoodbye":false}}`;
