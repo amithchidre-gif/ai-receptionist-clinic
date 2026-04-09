@@ -684,7 +684,7 @@ async function processIdentityVerificationStep(
       }
       if (yn === 'no') {
         session.firstNameRaw = undefined;
-        session.collectedData.name = undefined;
+        session.collectedData.name = null;
         session.verificationStep = 'await_first_name';
         return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
@@ -896,7 +896,7 @@ async function processState(
 
   // Name confirmed when caller says "yes" after AI asks "Is that [Name]?" in identity_verification
   if (e.isYes && session.collectedData.name && !session.nameConfirmed
-      && session.state === 'identity_verification') {
+      && (session.state as string) === 'identity_verification') {
     session.nameConfirmed = true;
   }
 
@@ -907,7 +907,7 @@ async function processState(
     session.collectedData.phone &&
     session.nameConfirmed;  // name must be verbally confirmed before leaving verification
   const leavingVerification =
-    session.state === 'identity_verification' && nextState !== 'identity_verification';
+    (session.state as string) === 'identity_verification' && nextState !== 'identity_verification';
 
   if (leavingVerification && hasAllIdentityData && !session.identityVerified) {
     try {
