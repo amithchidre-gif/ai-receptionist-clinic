@@ -145,6 +145,7 @@ const WARMUP_PHRASES: string[] = [
   'And your last name?',
   'Date of birth?',
   'Best phone number?',
+  'Please give all 10 digits.',
   'Sorry, could you say that again?',
   'What day and time works for you?',
   'Got it. Which appointment would you like to cancel?',

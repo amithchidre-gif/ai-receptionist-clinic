@@ -150,7 +150,7 @@ RULES:
   nameConfirmed=NO in context: MUST ask "Is that [Name]?" before collecting dob. Stay identity_verification.
   After dob extracted: say "Got it, [Month Day Year]?" and wait for isYes before asking phone.
 - booking_flow→awaiting_date: ask "What date and time works for you?"
-- awaiting_date: once bookingDate extracted → awaiting_time; ask "And what time? E.g., 10 AM."
+- awaiting_date: extract bookingDate AND bookingTime if caller says both in one sentence (e.g. "Friday at 2 PM" → extract both). If ONLY date given → awaiting_time, ask "And what time? E.g., 10 AM." If BOTH extracted → awaiting_time, ask "Is [weekday date] at [time] right?" (skip separate time question).
 - awaiting_time: once BOTH date+time known, ask "Is [Day Date] at [Time] right?" Stay awaiting_time until isYes.
 - On isYes in awaiting_time: set next_state to awaiting_time (server handles booking + goodbye automatically).
 - NEVER write a date as "YYYY-MM-DD". Always say it naturally: "Wednesday April 9th", "Monday March 2nd".

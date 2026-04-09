@@ -266,7 +266,7 @@ function keywordExtract(transcript: string): LLMExtracted {
   const dobDayFirst = transcript.match(
     /\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(January|February|March|April|May|June|July|August|September|October|November|December),?\s+(\d{4})\b/i
   );
-  const dobSlash = transcript.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/);
+  const dobSlash = transcript.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b/);
 
   if (dobMonthFirst) {
     const m = MONTHS[dobMonthFirst[1].toLowerCase()];
@@ -524,6 +524,7 @@ const STATIC = {
   cancelAsk:     'Got it. Which appointment would you like to cancel?',
   rescheduleAsk: 'Sure. What date works for the new appointment?',
   bookingDone:   "You'll get a text confirmation. Have a great day, bye!",
+  phoneRetry:    'Please give all 10 digits.',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -651,6 +652,63 @@ async function handleVerificationComplete(
 }
 
 // ---------------------------------------------------------------------------
+// DOB text pre-processor — converts ordinal words and spoken years to digit form
+// before the keywordExtract DOB regexes run.  Called only in await_dob.
+// ---------------------------------------------------------------------------
+
+function preprocessDOBText(text: string): string {
+  let t = text;
+
+  // Ordinal words → ordinal digits ("fifth" → "5th", "third" → "3rd", etc.)
+  const ORDINALS: Record<string, string> = {
+    first:'1st', second:'2nd', third:'3rd', fourth:'4th', fifth:'5th',
+    sixth:'6th', seventh:'7th', eighth:'8th', ninth:'9th', tenth:'10th',
+    eleventh:'11th', twelfth:'12th', thirteenth:'13th', fourteenth:'14th',
+    fifteenth:'15th', sixteenth:'16th', seventeenth:'17th', eighteenth:'18th',
+    nineteenth:'19th', twentieth:'20th',
+    'twenty-first':'21st', 'twenty-second':'22nd', 'twenty-third':'23rd',
+    'twenty-fourth':'24th', 'twenty-fifth':'25th', 'twenty-sixth':'26th',
+    'twenty-seventh':'27th', 'twenty-eighth':'28th', 'twenty-ninth':'29th',
+    thirtieth:'30th', 'thirty-first':'31st',
+  };
+  for (const [word, digit] of Object.entries(ORDINALS)) {
+    t = t.replace(new RegExp(`\\b${word}\\b`, 'gi'), digit);
+  }
+
+  // Spoken years: "nineteen ninety" → "1990", "nineteen eighty five" → "1985"
+  const TENS: Record<string, number> = {
+    ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15,
+    sixteen:16, seventeen:17, eighteen:18, nineteen:19, twenty:20, thirty:30,
+    forty:40, fifty:50, sixty:60, seventy:70, eighty:80, ninety:90,
+  };
+  const ONES: Record<string, number> = {
+    one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9,
+  };
+  t = t.replace(
+    /\bninete{1,2}n\s+(ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:\s+(one|two|three|four|five|six|seven|eight|nine))?\b/gi,
+    (_m: string, tens: string, units?: string) => {
+      const y = 1900 + (TENS[tens.toLowerCase()] || 0) + (units ? (ONES[units.toLowerCase()] || 0) : 0);
+      return String(y);
+    },
+  );
+  // "two thousand [optional part]" → 2000–2029
+  t = t.replace(
+    /\btwo\s+thousand(?:\s+(?:and\s+)?(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|one|two|three|four|five|six|seven|eight|nine|zero)(?:\s+(one|two|three|four|five|six|seven|eight|nine))?)?\b/gi,
+    (_m: string, part1?: string, part2?: string) => {
+      const T2: Record<string,number> = {twenty:20,thirty:30,forty:40,fifty:50,sixty:60,seventy:70,eighty:80,ninety:90};
+      const AL: Record<string,number> = {zero:0,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19};
+      if (!part1) return '2000';
+      const p = part1.toLowerCase();
+      if (T2[p] !== undefined) {
+        return String(2000 + T2[p] + (part2 ? (AL[part2.toLowerCase()] || 0) : 0));
+      }
+      return String(2000 + (AL[p] || 0));
+    },
+  );
+  return t;
+}
+
+// ---------------------------------------------------------------------------
 // Identity verification step machine — NO LLM for normal turns.
 // Falls back to LLM (via processState with llm_override) on unexpected input.
 // ---------------------------------------------------------------------------
@@ -723,7 +781,8 @@ async function processIdentityVerificationStep(
     }
 
     case 'await_dob': {
-      const extracted = keywordExtract(transcript);
+      const dobPreprocessed = preprocessDOBText(transcript);
+      const extracted = keywordExtract(dobPreprocessed);
       if (!extracted.dateOfBirth) {
         return { responseText: STATIC.dobAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
@@ -750,7 +809,10 @@ async function processIdentityVerificationStep(
     case 'await_phone': {
       const extracted = keywordExtract(transcript);
       if (!extracted.phone) {
-        return { responseText: STATIC.phoneAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+        // If the caller has already started saying digits, give format guidance
+        const hasDigits = /\d/.test(transcript);
+        const reAsk = hasDigits ? STATIC.phoneRetry : STATIC.phoneAsk;
+        return { responseText: reAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       session.collectedData.phone = `+1${extracted.phone}`;
       session.verificationStep = 'confirm_phone';
@@ -807,10 +869,10 @@ async function processState(
       // Also try to extract a name if the caller said it in the same breath
       // (only use the named-phrase pattern — bare words like "book" would false-match)
       const namedMatch = preprocessedForIntent.match(
-        /(?:my name is|i am|i'm|this is|name's|it's)s+([A-Za-z]+(?:s+[A-Za-z]+)*)/i
+        /(?:my name is|i am|i'm|this is|name's|it's)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
       );
       if (namedMatch) {
-        const raw = namedMatch[1].trim().split(/s+/)[0];
+        const raw = namedMatch[1].trim().split(/\s+/)[0];
         const firstName = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
         session.firstNameRaw = firstName;
         session.collectedData.name = firstName;
