@@ -208,6 +208,24 @@ export async function warmTtsCache(): Promise<void> {
 }
 
 
+export async function warmClinicGreeting(clinicName: string): Promise<void> {
+  const apiKey = config.speechmaticsApiKey;
+  if (!apiKey) return;
+  const greeting = `Welcome to ${clinicName}! To book, reschedule, or cancel an appointment, just say which one.`;
+  const cacheKey = ttsCacheKey(greeting);
+  if (TTS_CACHE.has(cacheKey)) return;
+  try {
+    const audioBuffer = await speechmaticsRequest(greeting, apiKey, 2, 500);
+    if (audioBuffer.byteLength > 0) {
+      if (TTS_CACHE.size >= TTS_CACHE_MAX) {
+        TTS_CACHE.delete(TTS_CACHE.keys().next().value as string);
+      }
+      TTS_CACHE.set(cacheKey, audioBuffer);
+      console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'Clinic greeting pre-warmed', clinicName }));
+    }
+  } catch { /* Non-fatal */ }
+}
+
 export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
   const { text, sessionId, clinicId } = params;
 

@@ -557,8 +557,10 @@ function extractNameSimple(preprocessed: string): string | null {
       .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
       .join(' ');
   }
+  // Strip trailing Deepgram smart_format punctuation (e.g. "Amith.")
+  const cleaned = preprocessed.replace(/[.,!?;:]+$/, '').trim();
   // Bare name: 1–3 words, any capitalisation (Deepgram varies)
-  const bare = preprocessed.match(/^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})$/);
+  const bare = cleaned.match(/^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})$/);
   if (bare) {
     return bare[1].trim().split(/\s+/)
       .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
@@ -663,9 +665,8 @@ async function processIdentityVerificationStep(
     case 'await_first_name': {
       const name = extractNameSimple(preprocessed);
       if (!name) {
-        // Unexpected input — hand off to LLM (Change A)
-        session.verificationStep = 'llm_override';
-        return processState(session, transcript);
+        // Re-ask without LLM
+        return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       session.firstNameRaw = name.split(/\s+/)[0]; // first token only
       session.collectedData.name = session.firstNameRaw;
@@ -681,16 +682,20 @@ async function processIdentityVerificationStep(
         session.verificationStep = 'await_last_name';
         return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      // 'no' or ambiguous → LLM fallback (Changes B+C)
-      session.verificationStep = 'llm_override';
-      return processState(session, transcript);
+      if (yn === 'no') {
+        session.firstNameRaw = undefined;
+        session.collectedData.name = undefined;
+        session.verificationStep = 'await_first_name';
+        return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      }
+      // Ambiguous — re-ask the confirm question
+      return { responseText: buildSpellingConfirm(session.firstNameRaw ?? ''), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
 
     case 'await_last_name': {
       const name = extractNameSimple(preprocessed);
       if (!name) {
-        session.verificationStep = 'llm_override';
-        return processState(session, transcript);
+        return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       const lastName = name.split(/\s+/).slice(-1)[0];
       session.collectedData.name = `${session.firstNameRaw ?? ''} ${lastName}`.trim();
@@ -706,15 +711,21 @@ async function processIdentityVerificationStep(
         session.verificationStep = 'await_dob';
         return { responseText: STATIC.dobAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      session.verificationStep = 'llm_override';
-      return processState(session, transcript);
+      if (yn === 'no') {
+        const parts2 = (session.collectedData.name ?? '').trim().split(/\s+/);
+        session.collectedData.name = parts2[0] ?? '';
+        session.verificationStep = 'await_last_name';
+        return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      }
+      // Ambiguous — re-ask
+      const lastN = (session.collectedData.name ?? '').trim().split(/\s+/).slice(-1)[0] ?? '';
+      return { responseText: buildSpellingConfirm(lastN), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
 
     case 'await_dob': {
       const extracted = keywordExtract(transcript);
       if (!extracted.dateOfBirth) {
-        session.verificationStep = 'llm_override';
-        return processState(session, transcript);
+        return { responseText: STATIC.dobAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       session.collectedData.dateOfBirth = extracted.dateOfBirth;
       session.verificationStep = 'confirm_dob';
@@ -727,15 +738,19 @@ async function processIdentityVerificationStep(
         session.verificationStep = 'await_phone';
         return { responseText: STATIC.phoneAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      session.verificationStep = 'llm_override';
-      return processState(session, transcript);
+      if (yn === 'no') {
+        session.collectedData.dateOfBirth = undefined;
+        session.verificationStep = 'await_dob';
+        return { responseText: STATIC.dobAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      }
+      // Ambiguous — re-ask
+      return { responseText: buildDOBConfirm(session.collectedData.dateOfBirth ?? ''), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
 
     case 'await_phone': {
       const extracted = keywordExtract(transcript);
       if (!extracted.phone) {
-        session.verificationStep = 'llm_override';
-        return processState(session, transcript);
+        return { responseText: STATIC.phoneAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       session.collectedData.phone = `+1${extracted.phone}`;
       session.verificationStep = 'confirm_phone';
@@ -753,17 +768,16 @@ async function processIdentityVerificationStep(
         session.verificationStep = 'await_phone';
         return { responseText: STATIC.phoneAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      // Ambiguous → LLM fallback (Change C)
-      session.verificationStep = 'llm_override';
-      return processState(session, transcript);
+      // Ambiguous — re-ask confirm phone
+      return { responseText: buildPhoneConfirm((session.collectedData.phone ?? '').replace(/^\+1/, '')), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
 
     case 'complete':
       return handleVerificationComplete(session);
 
     default: {
-      session.verificationStep = 'llm_override';
-      return processState(session, transcript);
+      session.verificationStep = 'await_first_name';
+      return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
   }
 }
@@ -778,7 +792,9 @@ async function processState(
 ): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number; ttsWaitMs: number }> {
   // ─── Greeting (hardcoded — no user input to process yet) ──────────────────────
   if (session.state === 'greeting') {
-    return { responseText: STATIC.greeting, nextState: 'intent_detection', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+    const clinicNameG = await getClinicName(session.clinicId);
+    const greetingText = `Welcome to ${clinicNameG}! To book, reschedule, or cancel an appointment, just say which one.`;
+    return { responseText: greetingText, nextState: 'intent_detection', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
   }
 
   // ─── Intent detection: keyword fast-path — skips LLM for clear intents ────
@@ -795,7 +811,7 @@ async function processState(
   }
 
   // ─── Identity verification: step machine (no LLM unless unexpected input) ─
-  if (session.state === 'identity_verification' && session.verificationStep !== 'llm_override') {
+  if (session.state === 'identity_verification') {
     return processIdentityVerificationStep(session, transcript);
   }
 

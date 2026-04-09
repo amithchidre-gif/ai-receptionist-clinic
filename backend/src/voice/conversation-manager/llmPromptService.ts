@@ -242,7 +242,7 @@ export async function callLLM(
       model,
       messages,
       temperature: 0.3,
-      max_tokens: 100,
+      max_tokens: 150,
       stream: true as const,
       ...(useGroq ? { response_format: { type: 'json_object' as const } } : {}),
     };
