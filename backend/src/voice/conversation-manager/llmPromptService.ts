@@ -154,6 +154,7 @@ RULES:
 - awaiting_time: once BOTH date+time known, ask "Is [Day Date] at [Time] right?" Stay awaiting_time until isYes.
 - On isYes in awaiting_time: set next_state to awaiting_time (server handles booking + goodbye automatically).
 - NEVER write a date as "YYYY-MM-DD". Always say it naturally: "Wednesday April 9th", "Monday March 2nd".
+- Day-of-week conflict: if caller says a weekday AND a specific date that don't agree (e.g. "Wednesday the 9th" when April 9 is Thursday), ask "I have [correct weekday] the [date] — which did you mean?" Stay awaiting_date.
 - handoff after 5+ failed attempts or caller asks for a person.
 
 EXTRACT from caller's words:
@@ -241,7 +242,7 @@ export async function callLLM(
       model,
       messages,
       temperature: 0.3,
-      max_tokens: 130,
+      max_tokens: 100,
       stream: true as const,
       ...(useGroq ? { response_format: { type: 'json_object' as const } } : {}),
     };

@@ -1,4 +1,4 @@
-﻿import axios from 'axios';
+import axios from 'axios';
 import { config } from '../../config/env';
 
 export interface TtsResult {
@@ -13,9 +13,13 @@ interface SynthesizeParams {
   clinicId: string;
 }
 
-// Cartesia Sonic-3 bytes endpoint — returns raw MP3 binary
-const CARTESIA_TTS_URL = 'https://api.cartesia.ai/tts/bytes';
-const CARTESIA_VERSION = '2024-06-10';
+// ---------------------------------------------------------------------------
+// Speechmatics TTS — preview endpoint, Megan voice (US English Female)
+// API docs: https://docs.speechmatics.com/text-to-speech/quickstart
+// ---------------------------------------------------------------------------
+const SM_TTS_URL = 'https://preview.tts.speechmatics.com/generate/megan';
+// Output: WAV 16kHz 16-bit mono (the only format available as of preview)
+const SM_OUTPUT_FORMAT = 'wav_16000';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -23,14 +27,13 @@ const CARTESIA_VERSION = '2024-06-10';
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
 
 /**
- * Low-level Cartesia HTTP call with 429-aware exponential backoff retry.
+ * Low-level Speechmatics HTTP call with 429-aware exponential backoff retry.
  * @param maxRetries  - how many times to retry after 429 (0 = no retry)
  * @param baseDelayMs - first retry delay; doubles each attempt (capped at 30 s)
  */
-async function cartesiaRequest(
+async function speechmaticsRequest(
   text: string,
   apiKey: string,
-  voiceId: string,
   maxRetries: number,
   baseDelayMs: number,
 ): Promise<Buffer> {
@@ -38,17 +41,11 @@ async function cartesiaRequest(
   while (true) {
     try {
       const response = await axios.post(
-        CARTESIA_TTS_URL,
-        {
-          model_id: 'sonic-3',
-          transcript: text,
-          voice: { mode: 'id', id: voiceId },
-          output_format: { container: 'mp3', encoding: 'mp3', sample_rate: 22050 },
-        },
+        `${SM_TTS_URL}?output_format=${SM_OUTPUT_FORMAT}`,
+        { text },
         {
           headers: {
-            'X-API-Key': apiKey,
-            'Cartesia-Version': CARTESIA_VERSION,
+            'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
           responseType: 'arraybuffer',
@@ -61,7 +58,6 @@ async function cartesiaRequest(
       const status = axiosErr?.response?.status;
 
       if (status === 429 && attempt < maxRetries) {
-        // Respect Retry-After header if present, else exponential backoff
         const headers = axiosErr.response?.headers as Record<string, string> | undefined;
         const retryAfterHeader = headers?.['retry-after'];
         const backoff = baseDelayMs * Math.pow(2, attempt);
@@ -72,7 +68,7 @@ async function cartesiaRequest(
         console.warn(JSON.stringify({
           level: 'warn',
           event: 'tts_rate_limited',
-          provider: 'cartesia',
+          provider: 'speechmatics',
           attempt: attempt + 1,
           maxRetries,
           retryAfterMs: delay,
@@ -93,13 +89,10 @@ async function cartesiaRequest(
 const TTS_CACHE = new Map<string, Buffer>();
 const TTS_CACHE_MAX = 120;
 
-function ttsCacheKey(text: string, voiceId: string): string {
-  return `${voiceId}::${text.trim()}`;
+function ttsCacheKey(text: string): string {
+  return text.trim();
 }
 
-// ---------------------------------------------------------------------------
-// Static phrases to pre-synthesise on server startup so first-call latency
-// is the same as all subsequent calls (~zero TTS wait for these responses).
 // ---------------------------------------------------------------------------
 const WARMUP_PHRASES: string[] = [
   'Sure, I can help with that. First I need to verify your identity. May I have your full name?',
@@ -146,7 +139,18 @@ const WARMUP_PHRASES: string[] = [
   // Name/DOB confirmation tail phrases
   'Is that right?',
   'Is that correct?',
-  // Greeting — must match conversationManager greeting text exactly for cache hit on T1
+  // Hybrid script — must match STATIC object in conversationManager.ts exactly for cache hits
+  'Welcome! To book, reschedule, or cancel, just say which one.',
+  "What's your first name?",
+  'And your last name?',
+  'Date of birth?',
+  'Best phone number?',
+  'Sorry, could you say that again?',
+  'What day and time works for you?',
+  'Got it. Which appointment would you like to cancel?',
+  'Sure. What date works for the new appointment?',
+  "You'll get a text confirmation. Have a great day, bye!",
+  // Greeting — kept for backward compat
   'Thanks for calling! How can I help you today?',
 ];
 
@@ -156,26 +160,24 @@ const WARMUP_PHRASES: string[] = [
  * Call this once after the server is listening.
  */
 export async function warmTtsCache(): Promise<void> {
-  const apiKey = config.cartesiaApiKey;
+  const apiKey = config.speechmaticsApiKey;
   if (!apiKey) {
-    console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS warm-up skipped — CARTESIA_API_KEY not set' }));
+    console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS warm-up skipped — SPEECHMATICS_API_KEY not set' }));
     return;
   }
 
-  const voiceId = config.cartesiaVoiceId;
-  const toWarm = WARMUP_PHRASES.filter(p => !TTS_CACHE.has(ttsCacheKey(p, voiceId)));
+  const toWarm = WARMUP_PHRASES.filter(p => !TTS_CACHE.has(ttsCacheKey(p)));
 
   if (toWarm.length === 0) {
     console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS warm-up skipped — all phrases already cached' }));
     return;
   }
 
-  console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS cache warm-up started', phraseCount: toWarm.length }));
+  console.log(JSON.stringify({ level: 'info', service: 'ttsService', message: 'TTS cache warm-up started', phraseCount: toWarm.length, provider: 'speechmatics', voice: 'megan' }));
 
-  // Batch size 2 + 500 ms inter-batch delay to stay within Cartesia free-tier rate limits.
-  // Each request retries up to 4 times with exponential backoff starting at 1 s.
-  const BATCH = 2;
-  const INTER_BATCH_DELAY_MS = 500;
+  // Batch size 3 with 200 ms inter-batch delay — Speechmatics preview has no stated rate limits
+  const BATCH = 3;
+  const INTER_BATCH_DELAY_MS = 200;
   let warmed = 0;
   let failed = 0;
 
@@ -183,9 +185,9 @@ export async function warmTtsCache(): Promise<void> {
     const batch = toWarm.slice(i, i + BATCH);
     await Promise.all(batch.map(async (phrase) => {
       try {
-        const audioBuffer = await cartesiaRequest(phrase, apiKey, voiceId, 4, 1000);
+        const audioBuffer = await speechmaticsRequest(phrase, apiKey, 3, 500);
         if (audioBuffer.byteLength > 0) {
-          const cacheKey = ttsCacheKey(phrase, voiceId);
+          const cacheKey = ttsCacheKey(phrase);
           if (TTS_CACHE.size >= TTS_CACHE_MAX) {
             TTS_CACHE.delete(TTS_CACHE.keys().next().value as string);
           }
@@ -193,11 +195,10 @@ export async function warmTtsCache(): Promise<void> {
           warmed++;
         }
       } catch {
-        failed++; // phrase remains uncached; will be synthesised on first use
+        failed++;
       }
     }));
 
-    // Pause between batches (skip after last batch)
     if (i + BATCH < toWarm.length) {
       await sleep(INTER_BATCH_DELAY_MS);
     }
@@ -210,12 +211,11 @@ export async function warmTtsCache(): Promise<void> {
 export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
   const { text, sessionId, clinicId } = params;
 
-  const apiKey = config.cartesiaApiKey;
-  const voiceId = config.cartesiaVoiceId;
+  const apiKey = config.speechmaticsApiKey;
 
-  // Return cached audio for phrases — raised ceiling to 500 chars to cover longer dynamic responses
+  // Return cached audio for phrases — ceiling at 500 chars
   if (text.length < 500) {
-    const cacheKey = ttsCacheKey(text, voiceId);
+    const cacheKey = ttsCacheKey(text);
     const cached = TTS_CACHE.get(cacheKey);
     if (cached) {
       console.log(JSON.stringify({ level: 'debug', service: 'ttsService', message: 'TTS cache hit', textLength: text.length, sessionId }));
@@ -229,21 +229,17 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
       event: 'tts_config_error',
       sessionId,
       clinicId,
-      error: 'CARTESIA_API_KEY is not set',
+      error: 'SPEECHMATICS_API_KEY is not set',
     }));
     return { audioBuffer: null, text };
   }
 
-  // Debug log before API call — never log text (PHI)
   console.log(JSON.stringify({
     level: 'debug',
     service: 'ttsService',
-    provider: 'cartesia',
+    provider: 'speechmatics',
+    voice: 'megan',
     message: 'TTS request',
-    voiceId,
-    modelId: 'sonic-3',
-    apiKeyPrefix: apiKey.substring(0, 10) + '...',
-    apiKeyLength: apiKey.length,
     textLength: text.length,
     sessionId,
     clinicId,
@@ -252,25 +248,22 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
   const start = Date.now();
 
   try {
-    // Live calls: 1 retry with 500 ms initial backoff — avoids silent failure on transient 429
-    const audioBuffer = await cartesiaRequest(text, apiKey, voiceId, 1, 500);
+    const audioBuffer = await speechmaticsRequest(text, apiKey, 1, 500);
     const durationMs = Date.now() - start;
 
-    // Cache all synthesised audio (ceiling raised to 500 chars)
     if (audioBuffer.byteLength > 0 && text.length < 500) {
-      const cacheKey = ttsCacheKey(text, voiceId);
+      const cacheKey = ttsCacheKey(text);
       if (TTS_CACHE.size >= TTS_CACHE_MAX) {
-        // Evict oldest entry
         TTS_CACHE.delete(TTS_CACHE.keys().next().value as string);
       }
       TTS_CACHE.set(cacheKey, audioBuffer);
     }
 
-    // Never log the text — PHI risk
     console.log(JSON.stringify({
       level: 'info',
       event: 'tts_synthesized',
-      provider: 'cartesia',
+      provider: 'speechmatics',
+      voice: 'megan',
       sessionId,
       clinicId,
       durationMs,
@@ -279,7 +272,6 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
 
     return { audioBuffer: audioBuffer.byteLength > 0 ? audioBuffer : null, text, durationMs };
   } catch (err: unknown) {
-    // Never include text in the error log — PHI risk
     const axiosErr = err as import('axios').AxiosError;
     const status = axiosErr?.response?.status;
     const responseBody = axiosErr?.response?.data
@@ -291,22 +283,14 @@ export async function synthesize(params: SynthesizeParams): Promise<TtsResult> {
     console.error(JSON.stringify({
       level: 'error',
       event: 'tts_synthesis_failed',
-      provider: 'cartesia',
+      provider: 'speechmatics',
       sessionId,
       clinicId,
-      status,
-      ...(status === 401 && {
-        hint: 'Cartesia 401 — check CARTESIA_API_KEY is correct (starts with sk_car_)',
-        apiKeyPrefix: apiKey.substring(0, 10) + '...',
-        apiKeyLength: apiKey.length,
-        responseBody,
-      }),
-      ...(status === 429 && {
-        hint: 'Cartesia 429 — rate limit hit during live call (already retried once)',
-        responseBody,
-      }),
-      error: (err as Error)?.message ?? 'Unknown TTS error',
+      httpStatus: status,
+      responseBody,
+      error: (err as Error).message,
     }));
+
     return { audioBuffer: null, text };
   }
 }

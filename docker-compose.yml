@@ -1,4 +1,4 @@
-﻿services:
+services:
   postgres:
     image: postgres:15
     container_name: clinic-postgres
@@ -57,6 +57,9 @@
       # Inworld (TTS)
       INWORLD_API_KEY: cTJqVWFrQzVtQ1ZDRjB2eU9hYWRzRGRwRlVPQk5aaEU6SWxEZVc1OTROVEJpRDVvWWEzQWtFQjRYZ0U2akR3UnIwaXRCUHNvOHhYSXJDNXJ3U29TeDA2NWRmNjRzcE00OA==
       INWORLD_VOICE_ID: Ashley
+
+      # Speechmatics (TTS - active provider, voice: megan)
+      SPEECHMATICS_API_KEY: HXV5bbIQJS0yPkD9dx9muCn7OTWUdWxZ
 
       # Telnyx (Voice + SMS)
       TELNYX_API_KEY: KEY019CF915BC168D1E1A4EBF209CC8E2AD_4Clg7e3lrlm8vvcjD3lkLv

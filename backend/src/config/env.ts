@@ -25,7 +25,7 @@ const rawDbUrl = process.env.DATABASE_URL ?? '(not set)';
 const maskedDbUrl = rawDbUrl.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:***@');
 console.log(`[env.ts] DATABASE_URL: ${maskedDbUrl}`);
 console.log(`[env.ts] INWORLD_API_KEY set: ${!!process.env.INWORLD_API_KEY}`);
-console.log(`[env.ts] CARTESIA_API_KEY set: ${!!process.env.CARTESIA_API_KEY}`);
+console.log(`[env.ts] SPEECHMATICS_API_KEY set: ${!!process.env.SPEECHMATICS_API_KEY}`);
 
 // Support Google credentials stored as JSON string in env (for Render/cloud deployments)
 // Set GOOGLE_CREDENTIALS_JSON to the full JSON content of the service account file
@@ -46,7 +46,7 @@ const recommended = [
   "JWT_SECRET",
   "TELNYX_API_KEY",
   "DEEPGRAM_API_KEY",
-  "CARTESIA_API_KEY",
+  "SPEECHMATICS_API_KEY",
   "OPENAI_API_KEY",
   "FRONTEND_URL",
 ];
@@ -69,9 +69,10 @@ export const config = {
   deepgramApiKey: process.env.DEEPGRAM_API_KEY ?? '',
   inworldApiKey: process.env.INWORLD_API_KEY ?? '',
   inworldVoiceId: process.env.INWORLD_VOICE_ID ?? 'Ashley',
+  // Speechmatics TTS — active provider (voice: megan, US English Female)
+  speechmaticsApiKey: process.env.SPEECHMATICS_API_KEY ?? '',
+  // Cartesia — kept for rollback only (not used by ttsService)
   cartesiaApiKey: process.env.CARTESIA_API_KEY ?? '',
-  // Default voice: "Barbossa" — override with CARTESIA_VOICE_ID env var
-  // Browse voices at https://play.cartesia.ai/voices
   cartesiaVoiceId: process.env.CARTESIA_VOICE_ID ?? 'a0e99841-438c-4a64-b679-ae501e7d6091',
   openrouterApiKey: process.env.OPENAI_API_KEY ?? '',
   openrouterModel: (process.env.OPENAI_MODEL ?? 'gpt-4o-mini').replace(/^openai\//, ''),

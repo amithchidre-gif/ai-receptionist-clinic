@@ -28,6 +28,18 @@ export type ConversationState =
   | 'completed'
   | 'handoff';
 
+export type VerificationStep =
+  | 'await_first_name'
+  | 'confirm_first_name'
+  | 'await_last_name'
+  | 'confirm_last_name'
+  | 'await_dob'
+  | 'confirm_dob'
+  | 'await_phone'
+  | 'confirm_phone'
+  | 'complete'
+  | 'llm_override';
+
 export interface ConversationSession {
   sessionId: string;
   clinicId: string;
@@ -53,6 +65,9 @@ export interface ConversationSession {
   nameConfirmed: boolean;         // true once last name spelling confirmed
   firstNameConfirmed: boolean;    // true once first name spelling confirmed
   lastResponseOpener: string | null; // first word of last AI turn (prevents opener repetition)
+  verificationStep: VerificationStep;  // current sub-step in identity step machine
+  firstNameRaw: string | null;         // first name only during step machine collection
+  nameConfirmAttempts: number;         // confirmation retry counter
   createdAt: Date;
   updatedAt: Date;
 }
@@ -341,6 +356,9 @@ function getOrCreateSession(
     nameConfirmed: false,
     firstNameConfirmed: false,
     lastResponseOpener: null,
+    verificationStep: 'await_first_name',
+    firstNameRaw: null,
+    nameConfirmAttempts: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -440,6 +458,9 @@ async function saveSessionToDB(session: ConversationSession): Promise<void> {
       lastAppointmentId: session.lastAppointmentId,
       nameConfirmed: session.nameConfirmed,
       firstNameConfirmed: session.firstNameConfirmed,
+      verificationStep: session.verificationStep,
+      firstNameRaw: session.firstNameRaw,
+      nameConfirmAttempts: session.nameConfirmAttempts,
     });
 
     await query(
@@ -489,6 +510,265 @@ async function updateCallLogStatus(
 }
 
 // ---------------------------------------------------------------------------
+// Hybrid script — static phrases (must match WARMUP_PHRASES in ttsService.ts exactly)
+// ---------------------------------------------------------------------------
+
+const STATIC = {
+  greeting:      'Welcome! To book, reschedule, or cancel, just say which one.',
+  firstNameAsk:  "What's your first name?",
+  lastNameAsk:   'And your last name?',
+  dobAsk:        'Date of birth?',
+  phoneAsk:      'Best phone number?',
+  sayAgain:      'Sorry, could you say that again?',
+  dateTimeAsk:   'What day and time works for you?',
+  cancelAsk:     'Got it. Which appointment would you like to cancel?',
+  rescheduleAsk: 'Sure. What date works for the new appointment?',
+  bookingDone:   "You'll get a text confirmation. Have a great day, bye!",
+} as const;
+
+// ---------------------------------------------------------------------------
+// Hybrid helpers — intent keyword, yes/no, name extraction, confirmations
+// ---------------------------------------------------------------------------
+
+function detectIntentKeyword(preprocessed: string): IntentType | null {
+  const t = preprocessed.toLowerCase();
+  const hasCancel = /\bcancel\b/.test(t);
+  const hasReschedule = /\b(reschedule|change|move|modify)\b/.test(t);
+  const hasBook = /\b(book|schedule|appointment|make an appointment|need an appointment|set up|set an)\b/.test(t);
+  if (hasCancel && !hasReschedule) return 'cancel_appointment';
+  if (hasReschedule) return 'reschedule_appointment';
+  if (hasBook) return 'book_appointment';
+  return null;
+}
+
+function detectYesNo(transcript: string): 'yes' | 'no' | null {
+  const t = transcript.toLowerCase();
+  if (/\b(yes|yeah|yep|yup|correct|right|sure|absolutely|that's right|exactly|confirmed|go ahead)\b/.test(t)) return 'yes';
+  if (/\b(no|nope|nah|wrong|incorrect|not right|that's wrong|not quite)\b/.test(t)) return 'no';
+  return null;
+}
+
+function extractNameSimple(preprocessed: string): string | null {
+  const named = preprocessed.match(
+    /(?:my name is|i am|i'm|this is|name's|last name is|last name's|it's)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
+  );
+  if (named) {
+    return named[1].trim().split(/\s+/)
+      .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(' ');
+  }
+  // Bare name: 1–3 words, any capitalisation (Deepgram varies)
+  const bare = preprocessed.match(/^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})$/);
+  if (bare) {
+    return bare[1].trim().split(/\s+/)
+      .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(' ');
+  }
+  return null;
+}
+
+/** "Amit" → "Is that A-M-I-T, Amit?" */
+function buildSpellingConfirm(name: string): string {
+  const spelled = name.toUpperCase().split('').join('-');
+  return `Is that ${spelled}, ${name}?`;
+}
+
+/** "03/30/1985" → "March 30th 1985, correct?" */
+function buildDOBConfirm(dob: string): string {
+  const MONTH_NAMES = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  const parts = dob.split('/');
+  if (parts.length !== 3) return `${dob}, correct?`;
+  const m = parseInt(parts[0], 10) - 1;
+  const d = parseInt(parts[1], 10);
+  const y = parts[2];
+  const suffix = (d >= 11 && d <= 13) ? 'th'
+    : d % 10 === 1 ? 'st'
+    : d % 10 === 2 ? 'nd'
+    : d % 10 === 3 ? 'rd'
+    : 'th';
+  return `${MONTH_NAMES[m] ?? 'Unknown'} ${d}${suffix} ${y}, correct?`;
+}
+
+/** "9063338206" → "And 9-0-6-3-3-3-8-2-0-6, correct?" */
+function buildPhoneConfirm(phone: string): string {
+  return `And ${phone.split('').join('-')}, correct?`;
+}
+
+// ---------------------------------------------------------------------------
+// Identity verification completion — upsert patient, advance to booking
+// ---------------------------------------------------------------------------
+
+async function handleVerificationComplete(
+  session: ConversationSession,
+): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number; ttsWaitMs: number }> {
+  try {
+    const { patient } = await upsertPatient({
+      clinicId: session.clinicId,
+      name: session.collectedData.name!,
+      phone: session.collectedData.phone!,
+      dateOfBirth: session.collectedData.dateOfBirth ?? undefined,
+    });
+    session.verifiedPatientId = patient.id;
+    session.identityVerified = true;
+    console.log(JSON.stringify({
+      level: 'info',
+      service: 'conversationManager',
+      event: 'identity_verified_step_machine',
+      sessionId: session.sessionId,
+      clinicId: session.clinicId,
+    }));
+  } catch (err) {
+    console.error(JSON.stringify({
+      level: 'error',
+      service: 'conversationManager',
+      message: 'upsertPatient failed in handleVerificationComplete',
+      sessionId: session.sessionId,
+      error: (err as Error).message,
+    }));
+    return {
+      responseText: "I'm having trouble verifying your information. Let me connect you with a staff member.",
+      nextState: 'handoff',
+      shouldAutoHangUp: false,
+      parallelTtsResult: null,
+      llmMs: 0,
+      ttsWaitMs: 0,
+    };
+  }
+
+  // Route to appropriate flow based on intent
+  if (session.intent === 'cancel_appointment') {
+    return { responseText: STATIC.cancelAsk, nextState: 'cancel_flow', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+  } else if (session.intent === 'reschedule_appointment') {
+    return { responseText: STATIC.rescheduleAsk, nextState: 'reschedule_flow', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+  }
+  // book_appointment or unknown
+  return { responseText: STATIC.dateTimeAsk, nextState: 'awaiting_date', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+}
+
+// ---------------------------------------------------------------------------
+// Identity verification step machine — NO LLM for normal turns.
+// Falls back to LLM (via processState with llm_override) on unexpected input.
+// ---------------------------------------------------------------------------
+
+async function processIdentityVerificationStep(
+  session: ConversationSession,
+  transcript: string,
+): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number; ttsWaitMs: number }> {
+  const preprocessed = preprocessSpelledLetters(transcript);
+
+  switch (session.verificationStep) {
+    case 'await_first_name': {
+      const name = extractNameSimple(preprocessed);
+      if (!name) {
+        // Unexpected input — hand off to LLM (Change A)
+        session.verificationStep = 'llm_override';
+        return processState(session, transcript);
+      }
+      session.firstNameRaw = name.split(/\s+/)[0]; // first token only
+      session.collectedData.name = session.firstNameRaw;
+      session.verificationStep = 'confirm_first_name';
+      return { responseText: buildSpellingConfirm(session.firstNameRaw), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+    }
+
+    case 'confirm_first_name': {
+      const yn = detectYesNo(transcript);
+      if (yn === 'yes') {
+        session.firstNameConfirmed = true;
+        session.nameConfirmAttempts = 0;
+        session.verificationStep = 'await_last_name';
+        return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      }
+      // 'no' or ambiguous → LLM fallback (Changes B+C)
+      session.verificationStep = 'llm_override';
+      return processState(session, transcript);
+    }
+
+    case 'await_last_name': {
+      const name = extractNameSimple(preprocessed);
+      if (!name) {
+        session.verificationStep = 'llm_override';
+        return processState(session, transcript);
+      }
+      const lastName = name.split(/\s+/).slice(-1)[0];
+      session.collectedData.name = `${session.firstNameRaw ?? ''} ${lastName}`.trim();
+      session.verificationStep = 'confirm_last_name';
+      return { responseText: buildSpellingConfirm(lastName), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+    }
+
+    case 'confirm_last_name': {
+      const yn = detectYesNo(transcript);
+      if (yn === 'yes') {
+        session.nameConfirmed = true;
+        session.nameConfirmAttempts = 0;
+        session.verificationStep = 'await_dob';
+        return { responseText: STATIC.dobAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      }
+      session.verificationStep = 'llm_override';
+      return processState(session, transcript);
+    }
+
+    case 'await_dob': {
+      const extracted = keywordExtract(transcript);
+      if (!extracted.dateOfBirth) {
+        session.verificationStep = 'llm_override';
+        return processState(session, transcript);
+      }
+      session.collectedData.dateOfBirth = extracted.dateOfBirth;
+      session.verificationStep = 'confirm_dob';
+      return { responseText: buildDOBConfirm(extracted.dateOfBirth), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+    }
+
+    case 'confirm_dob': {
+      const yn = detectYesNo(transcript);
+      if (yn === 'yes') {
+        session.verificationStep = 'await_phone';
+        return { responseText: STATIC.phoneAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      }
+      session.verificationStep = 'llm_override';
+      return processState(session, transcript);
+    }
+
+    case 'await_phone': {
+      const extracted = keywordExtract(transcript);
+      if (!extracted.phone) {
+        session.verificationStep = 'llm_override';
+        return processState(session, transcript);
+      }
+      session.collectedData.phone = `+1${extracted.phone}`;
+      session.verificationStep = 'confirm_phone';
+      return { responseText: buildPhoneConfirm(extracted.phone), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+    }
+
+    case 'confirm_phone': {
+      const yn = detectYesNo(transcript);
+      if (yn === 'yes') {
+        session.verificationStep = 'complete';
+        return handleVerificationComplete(session);
+      } else if (yn === 'no') {
+        // Clear phone and re-ask directly (clear rejection, no LLM needed)
+        session.collectedData.phone = undefined;
+        session.verificationStep = 'await_phone';
+        return { responseText: STATIC.phoneAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      }
+      // Ambiguous → LLM fallback (Change C)
+      session.verificationStep = 'llm_override';
+      return processState(session, transcript);
+    }
+
+    case 'complete':
+      return handleVerificationComplete(session);
+
+    default: {
+      session.verificationStep = 'llm_override';
+      return processState(session, transcript);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // State machine processor
 // ---------------------------------------------------------------------------
 
@@ -498,11 +778,28 @@ async function processState(
 ): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number; ttsWaitMs: number }> {
   // ─── Greeting (hardcoded — no user input to process yet) ──────────────────────
   if (session.state === 'greeting') {
-    const responseText = `Thanks for calling! How can I help you today?`;
-    return { responseText, nextState: 'intent_detection', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+    return { responseText: STATIC.greeting, nextState: 'intent_detection', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
   }
 
-  // ─── All other states: single LLM call drives response + state + entities ─
+  // ─── Intent detection: keyword fast-path — skips LLM for clear intents ────
+  if (session.state === 'intent_detection') {
+    const preprocessedForIntent = preprocessSpelledLetters(transcript);
+    const detectedIntent = detectIntentKeyword(preprocessedForIntent);
+    if (detectedIntent) {
+      session.intent = detectedIntent;
+      session.verificationStep = 'await_first_name';
+      session.nameConfirmAttempts = 0;
+      return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+    }
+    // Unclear intent → fall through to LLM
+  }
+
+  // ─── Identity verification: step machine (no LLM unless unexpected input) ─
+  if (session.state === 'identity_verification' && session.verificationStep !== 'llm_override') {
+    return processIdentityVerificationStep(session, transcript);
+  }
+
+  // ─── All other states (+ llm_override): single LLM call ────────────────
   const clinicName = await getClinicName(session.clinicId);
   const preprocessed = preprocessSpelledLetters(transcript);
   const ctx: LLMCallContext = {
@@ -767,8 +1064,7 @@ async function confirmBooking(
   }
 
   session.bookingConfirmed = true;
-  const humanDate = formatDateForSpeech(rawDate);
-  const resp = `Booked! ${humanDate} at ${rawTime}. Text sent. Bye!`;
+  const resp = STATIC.bookingDone;
 
   // Start TTS first — DB write runs in parallel below (~200ms savings)
   const ttsPromise = synthesize({ text: resp, sessionId: session.sessionId, clinicId }).catch(() => null);

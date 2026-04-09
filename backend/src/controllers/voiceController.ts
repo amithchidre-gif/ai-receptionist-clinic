@@ -133,7 +133,7 @@ async function playAudioToCall(callControlId: string, audioBuffer: Buffer): Prom
   await fs.mkdir(audioDir, { recursive: true });
 
   const audioId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-  const audioFile = path.join(audioDir, `${audioId}.mp3`);
+  const audioFile = path.join(audioDir, `${audioId}.wav`);
   const baseUrl = process.env.BASE_URL ?? 'http://localhost:4000';
   const audioUrl = `${baseUrl}/api/audio/${audioId}`;
 

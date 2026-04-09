@@ -6,7 +6,7 @@ const router = Router();
 
 /**
  * GET /api/audio/:id
- * Serves a synthesized MP3 audio file to Telnyx for playback_start.
+ * Serves a synthesized WAV audio file to Telnyx for playback_start.
  * No auth required — Telnyx fetches this URL directly during an active call.
  */
 router.get('/:id', (req: Request, res: Response) => {
@@ -18,9 +18,9 @@ router.get('/:id', (req: Request, res: Response) => {
     return;
   }
 
-  const filePath = path.join(process.cwd(), 'tmp', 'audio', `${id}.mp3`);
+  const filePath = path.join(process.cwd(), 'tmp', 'audio', `${id}.wav`);
 
-  res.setHeader('Content-Type', 'audio/mpeg');
+  res.setHeader('Content-Type', 'audio/wav');
   res.setHeader('Cache-Control', 'no-cache');
 
   const stream = fs.createReadStream(filePath);
