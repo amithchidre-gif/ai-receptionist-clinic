@@ -683,8 +683,8 @@ async function processIdentityVerificationStep(
         return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       if (yn === 'no') {
-        session.firstNameRaw = undefined;
-        session.collectedData.name = null;
+        session.firstNameRaw = null;
+        session.collectedData.name = undefined;
         session.verificationStep = 'await_first_name';
         return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
