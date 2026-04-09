@@ -72,7 +72,7 @@ import voiceRoutes from './routes/voice';
 import audioRoutes from './routes/audio';
 import { handleTelnyxAudioStream } from './routes/wsStream';
 import { startReminderScheduler } from './services/reminderScheduler';
-import { warmTtsCache } from './voice/tts/ttsService';
+import { warmTtsCache, warmClinicGreeting } from './voice/tts/ttsService';
 
 app.use('/api/auth', authRoutes);
 app.use('/api/appointments', appointmentRoutes);
