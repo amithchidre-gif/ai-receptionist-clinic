@@ -221,8 +221,11 @@ export async function callLLM(
     return null;
   }
 
-  const today = new Date().toISOString().slice(0, 10);
-  const systemPrompt = buildSystemPrompt(ctx, clinicName, today);
+  const todayDate = new Date();
+  const today = todayDate.toISOString().slice(0, 10);
+  const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const todayWithDay = `${today} (${DAY_NAMES[todayDate.getDay()]})`;
+  const systemPrompt = buildSystemPrompt(ctx, clinicName, todayWithDay);
   const { client, model } = getClient();
   const useGroq = model.startsWith('llama');
 

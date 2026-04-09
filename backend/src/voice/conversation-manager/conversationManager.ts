@@ -60,7 +60,7 @@ export interface ConversationSession {
   bookingTime: string | null;
   bookingConfirmed: boolean;
   lastAppointmentId: string | null;
-  latencies: number[];            // per-turn totalMs — in-memory only, for avg at hangup
+  latencies: number[];            // per-turn totalMs â€” in-memory only, for avg at hangup
   conversationHistory: Array<{role: 'user' | 'assistant'; content: string}>;  // last 3 turns for LLM context
   nameConfirmed: boolean;         // true once last name spelling confirmed
   firstNameConfirmed: boolean;    // true once first name spelling confirmed
@@ -123,7 +123,7 @@ const VALID_INTENTS: IntentType[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Natural spelling detection — converts "A-M-I-T" or "A M I T" to "Amit"
+// Natural spelling detection â€” converts "A-M-I-T" or "A M I T" to "Amit"
 // ---------------------------------------------------------------------------
 
 const PHONETIC_REVERSE: Record<string, string> = {
@@ -137,21 +137,21 @@ const PHONETIC_REVERSE: Record<string, string> = {
 /**
  * Pre-process a transcript to resolve letter-by-letter spelling into words.
  * Handles:
- *   "A-M-I-T", "A.M.I.T", "a - m - i - t"     → "Amit"
- *   "A M I T" / "a m i t" (3+ consecutive)    → "Amit"
- *   "A as in Alpha, M as in Mike …"           → "Amit"
+ *   "A-M-I-T", "A.M.I.T", "a - m - i - t"     â†’ "Amit"
+ *   "A M I T" / "a m i t" (3+ consecutive)    â†’ "Amit"
+ *   "A as in Alpha, M as in Mike â€¦"           â†’ "Amit"
  */
 export function preprocessSpelledLetters(text: string): string {
   let result = text.trim();
 
-  // Step 1 — NATO phonetic: "X as in Word" → letter, e.g. "A as in Alpha" → "A"
+  // Step 1 â€” NATO phonetic: "X as in Word" â†’ letter, e.g. "A as in Alpha" â†’ "A"
   result = result.replace(
     /\b([A-Za-z]) as in ([A-Za-z]+(?:-[A-Za-z]+)?)\b/gi,
     (_m, letter: string, phonetic: string) =>
       PHONETIC_REVERSE[phonetic.toLowerCase()] ?? letter.toUpperCase(),
   );
 
-  // Step 2 — Separator-delimited single letters (3+), allowing optional spaces around separator.
+  // Step 2 â€” Separator-delimited single letters (3+), allowing optional spaces around separator.
   // Handles: "A-M-I-T", "A.M.I.T", "a - m - i - t", "A_M_I_T"
   result = result.replace(
     /\b([A-Za-z])(?:\s*[-._]\s*[A-Za-z]){2,}\b/g,
@@ -165,7 +165,7 @@ export function preprocessSpelledLetters(text: string): string {
     },
   );
 
-  // Step 2b — Comma-separated single letters (3+): "A, M, I, T" or "A,M,I,T" → "Amit"
+  // Step 2b â€” Comma-separated single letters (3+): "A, M, I, T" or "A,M,I,T" â†’ "Amit"
   result = result.replace(
     /\b([A-Za-z])(?:,\s*([A-Za-z])){2,}\b/g,
     (match: string) => {
@@ -174,7 +174,7 @@ export function preprocessSpelledLetters(text: string): string {
     },
   );
 
-  // Step 3 — Space-separated single letters (3+): "A M I T" or "a m i t" → "Amit"
+  // Step 3 â€” Space-separated single letters (3+): "A M I T" or "a m i t" â†’ "Amit"
   // Case-insensitive: Deepgram smart_format usually uppercases spoken letters, but may not always.
   result = result.replace(
     /\b([A-Za-z] ){2,}[A-Za-z]\b/g,
@@ -217,7 +217,7 @@ function keywordExtract(transcript: string): LLMExtracted {
   result.isNo = /\b(no|nope|nah|wrong|incorrect|not right|that's wrong)\b/.test(t);
   result.isGoodbye = /\b(goodbye|bye|thank you|thanks|that's all|that's it|all set|nothing else|no thanks|we're done|i'm done)\b/.test(t);
 
-  // Name: "my name is X Y", "I am X Y", "I'm X", "this is X Y" — use preprocessed for spelling
+  // Name: "my name is X Y", "I am X Y", "I'm X", "this is X Y" â€” use preprocessed for spelling
   const nameMatch = preprocessed.match(
     /(?:my name is|i am|i'm|this is|name's|last name is|last name's)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
   );
@@ -230,7 +230,7 @@ function keywordExtract(transcript: string): LLMExtracted {
   }
 
   // Bare-name fallback: caller says just their name ("Amit" or "Amit Chidre") with no prefix.
-  // Only fires when no other name was found and the entire preprocessed transcript is 1–3 title-case words.
+  // Only fires when no other name was found and the entire preprocessed transcript is 1â€“3 title-case words.
   if (!result.name) {
     const bare = preprocessed.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})$/);
     if (bare) {
@@ -291,7 +291,7 @@ function keywordExtract(transcript: string): LLMExtracted {
 function normalizeDOB(raw: string): string | null {
   const s = raw.trim();
 
-  // ISO: YYYY-MM-DD → MM/DD/YYYY
+  // ISO: YYYY-MM-DD â†’ MM/DD/YYYY
   const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (iso) return `${iso[2]}/${iso[3]}/${iso[1]}`;
 
@@ -311,7 +311,7 @@ function normalizeDOB(raw: string): string | null {
   return null;
 }
 
-// (extractWithLLM removed — replaced by callLLM in llmPromptService.ts)
+// (extractWithLLM removed â€” replaced by callLLM in llmPromptService.ts)
 
 // ---------------------------------------------------------------------------
 // In-memory session store
@@ -381,7 +381,7 @@ const PHONETIC_ALPHABET: Record<string, string> = {
 
 /**
  * Spell a single word using NATO phonetic alphabet.
- * "Amit" → "A as in Alpha, M as in Mike, I as in India, T as in Tango"
+ * "Amit" â†’ "A as in Alpha, M as in Mike, I as in India, T as in Tango"
  */
 export function spellPhonetic(word: string): string {
   return word
@@ -394,7 +394,7 @@ export function spellPhonetic(word: string): string {
 
 /**
  * Spell a full name using NATO phonetic alphabet (kept for backward compat).
- * "Sarah" → "S as in Sierra, A as in Alpha, R as in Romeo, A as in Alpha, H as in Hotel"
+ * "Sarah" â†’ "S as in Sierra, A as in Alpha, R as in Romeo, A as in Alpha, H as in Hotel"
  */
 export function spellName(name: string): string {
   return name.trim().split(/\s+/).map(spellPhonetic).join('; ');
@@ -423,7 +423,7 @@ async function getClinicName(clinicId: string): Promise<string> {
     console.warn(JSON.stringify({
       level: 'warn',
       service: 'conversationManager',
-      message: 'getClinicName failed — using fallback',
+      message: 'getClinicName failed â€” using fallback',
       clinicId,
       error: (err as Error).message,
       timestamp: new Date().toISOString(),
@@ -482,7 +482,7 @@ async function saveSessionToDB(session: ConversationSession): Promise<void> {
       clinicId: session.clinicId,
       error: error.message,
     }));
-    // Non-fatal — session still works from memory
+    // Non-fatal â€” session still works from memory
   }
 }
 
@@ -500,7 +500,7 @@ async function updateCallLogStatus(
     console.warn(JSON.stringify({
       level: 'warn',
       service: 'conversationManager',
-      message: 'updateCallLogStatus failed — non-fatal',
+      message: 'updateCallLogStatus failed â€” non-fatal',
       callLogId,
       clinicId,
       error: (err as Error).message,
@@ -510,7 +510,7 @@ async function updateCallLogStatus(
 }
 
 // ---------------------------------------------------------------------------
-// Hybrid script — static phrases (must match WARMUP_PHRASES in ttsService.ts exactly)
+// Hybrid script â€” static phrases (must match WARMUP_PHRASES in ttsService.ts exactly)
 // ---------------------------------------------------------------------------
 
 const STATIC = {
@@ -528,7 +528,7 @@ const STATIC = {
 } as const;
 
 // ---------------------------------------------------------------------------
-// Hybrid helpers — intent keyword, yes/no, name extraction, confirmations
+// Hybrid helpers â€” intent keyword, yes/no, name extraction, confirmations
 // ---------------------------------------------------------------------------
 
 function detectIntentKeyword(preprocessed: string): IntentType | null {
@@ -560,9 +560,18 @@ function extractNameSimple(preprocessed: string): string | null {
   }
   // Strip trailing Deepgram smart_format punctuation (e.g. "Amith.")
   const cleaned = preprocessed.replace(/[.,!?;:]+$/, '').trim();
-  // Bare name: 1–3 words, any capitalisation (Deepgram varies)
+  // Bare name: 1â€“3 words, any capitalisation (Deepgram varies)
   const bare = cleaned.match(/^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})$/);
   if (bare) {
+    const STOP_WORDS = new Set([
+      'you','your','yes','yeah','yep','no','nope','nah',
+      'ok','okay','sure','hi','hello','hey','bye','goodbye',
+      'thanks','thank','please','sorry','what','when','where',
+      'the','a','an','and','or','but','for','with','from',
+      'my','me','i','we','he','she','they','it','this','that',
+    ]);
+    const words = bare[1].trim().toLowerCase().split(/\s+/);
+    if (words.every((w: string) => STOP_WORDS.has(w))) return null;
     return bare[1].trim().split(/\s+/)
       .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
       .join(' ');
@@ -570,13 +579,13 @@ function extractNameSimple(preprocessed: string): string | null {
   return null;
 }
 
-/** "Amit" → "Is that A-M-I-T, Amit?" */
+/** "Amit" â†’ "Is that A-M-I-T, Amit?" */
 function buildSpellingConfirm(name: string): string {
   const spelled = name.toUpperCase().split('').join('-');
   return `Is that ${spelled}, ${name}?`;
 }
 
-/** "03/30/1985" → "March 30th 1985, correct?" */
+/** "03/30/1985" â†’ "March 30th 1985, correct?" */
 function buildDOBConfirm(dob: string): string {
   const MONTH_NAMES = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -595,13 +604,13 @@ function buildDOBConfirm(dob: string): string {
   return `${MONTH_NAMES[m] ?? 'Unknown'} ${d}${suffix} ${y}, correct?`;
 }
 
-/** "9063338206" → "And 9-0-6-3-3-3-8-2-0-6, correct?" */
+/** "9063338206" â†’ "And 9-0-6-3-3-3-8-2-0-6, correct?" */
 function buildPhoneConfirm(phone: string): string {
   return `And ${phone.split('').join('-')}, correct?`;
 }
 
 // ---------------------------------------------------------------------------
-// Identity verification completion — upsert patient, advance to booking
+// Identity verification completion â€” upsert patient, advance to booking
 // ---------------------------------------------------------------------------
 
 async function handleVerificationComplete(
@@ -652,14 +661,14 @@ async function handleVerificationComplete(
 }
 
 // ---------------------------------------------------------------------------
-// DOB text pre-processor — converts ordinal words and spoken years to digit form
+// DOB text pre-processor â€” converts ordinal words and spoken years to digit form
 // before the keywordExtract DOB regexes run.  Called only in await_dob.
 // ---------------------------------------------------------------------------
 
 function preprocessDOBText(text: string): string {
   let t = text;
 
-  // Ordinal words → ordinal digits ("fifth" → "5th", "third" → "3rd", etc.)
+  // Ordinal words â†’ ordinal digits ("fifth" â†’ "5th", "third" â†’ "3rd", etc.)
   const ORDINALS: Record<string, string> = {
     first:'1st', second:'2nd', third:'3rd', fourth:'4th', fifth:'5th',
     sixth:'6th', seventh:'7th', eighth:'8th', ninth:'9th', tenth:'10th',
@@ -675,7 +684,7 @@ function preprocessDOBText(text: string): string {
     t = t.replace(new RegExp(`\\b${word}\\b`, 'gi'), digit);
   }
 
-  // Spoken years: "nineteen ninety" → "1990", "nineteen eighty five" → "1985"
+  // Spoken years: "nineteen ninety" â†’ "1990", "nineteen eighty five" â†’ "1985"
   const TENS: Record<string, number> = {
     ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15,
     sixteen:16, seventeen:17, eighteen:18, nineteen:19, twenty:20, thirty:30,
@@ -691,7 +700,7 @@ function preprocessDOBText(text: string): string {
       return String(y);
     },
   );
-  // "two thousand [optional part]" → 2000–2029
+  // "two thousand [optional part]" â†’ 2000â€“2029
   t = t.replace(
     /\btwo\s+thousand(?:\s+(?:and\s+)?(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|one|two|three|four|five|six|seven|eight|nine|zero)(?:\s+(one|two|three|four|five|six|seven|eight|nine))?)?\b/gi,
     (_m: string, part1?: string, part2?: string) => {
@@ -709,7 +718,7 @@ function preprocessDOBText(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Identity verification step machine — NO LLM for normal turns.
+// Identity verification step machine â€” NO LLM for normal turns.
 // Falls back to LLM (via processState with llm_override) on unexpected input.
 // ---------------------------------------------------------------------------
 
@@ -746,7 +755,7 @@ async function processIdentityVerificationStep(
         session.verificationStep = 'await_first_name';
         return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      // Ambiguous — re-ask the confirm question
+      // Ambiguous â€” re-ask the confirm question
       return { responseText: buildSpellingConfirm(session.firstNameRaw ?? ''), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
 
@@ -775,7 +784,7 @@ async function processIdentityVerificationStep(
         session.verificationStep = 'await_last_name';
         return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      // Ambiguous — re-ask
+      // Ambiguous â€” re-ask
       const lastN = (session.collectedData.name ?? '').trim().split(/\s+/).slice(-1)[0] ?? '';
       return { responseText: buildSpellingConfirm(lastN), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
@@ -802,7 +811,7 @@ async function processIdentityVerificationStep(
         session.verificationStep = 'await_dob';
         return { responseText: STATIC.dobAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      // Ambiguous — re-ask
+      // Ambiguous â€” re-ask
       return { responseText: buildDOBConfirm(session.collectedData.dateOfBirth ?? ''), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
 
@@ -830,7 +839,7 @@ async function processIdentityVerificationStep(
         session.verificationStep = 'await_phone';
         return { responseText: STATIC.phoneAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      // Ambiguous — re-ask confirm phone
+      // Ambiguous â€” re-ask confirm phone
       return { responseText: buildPhoneConfirm((session.collectedData.phone ?? '').replace(/^\+1/, '')), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
 
@@ -852,14 +861,14 @@ async function processState(
   session: ConversationSession,
   transcript: string
 ): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number; ttsWaitMs: number }> {
-  // ─── Greeting (hardcoded — no user input to process yet) ──────────────────────
+  // â”€â”€â”€ Greeting (hardcoded â€” no user input to process yet) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (session.state === 'greeting') {
     const clinicNameG = await getClinicName(session.clinicId);
     const greetingText = `Welcome to ${clinicNameG}! To book, reschedule, or cancel an appointment, just say which one.`;
     return { responseText: greetingText, nextState: 'intent_detection', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
   }
 
-  // ─── Intent detection: keyword fast-path — skips LLM for clear intents ────
+  // â”€â”€â”€ Intent detection: keyword fast-path â€” skips LLM for clear intents â”€â”€â”€â”€
   if (session.state === 'intent_detection') {
     const preprocessedForIntent = preprocessSpelledLetters(transcript);
     const detectedIntent = detectIntentKeyword(preprocessedForIntent);
@@ -867,7 +876,7 @@ async function processState(
       session.intent = detectedIntent;
       session.nameConfirmAttempts = 0;
       // Also try to extract a name if the caller said it in the same breath
-      // (only use the named-phrase pattern — bare words like "book" would false-match)
+      // (only use the named-phrase pattern â€” bare words like "book" would false-match)
       const namedMatch = preprocessedForIntent.match(
         /(?:my name is|i am|i'm|this is|name's|it's)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
       );
@@ -882,15 +891,15 @@ async function processState(
       session.verificationStep = 'await_first_name';
       return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
-    // Unclear intent → fall through to LLM
+    // Unclear intent â†’ fall through to LLM
   }
 
-  // ─── Identity verification: step machine (no LLM unless unexpected input) ─
+  // â”€â”€â”€ Identity verification: step machine (no LLM unless unexpected input) â”€
   if (session.state === 'identity_verification') {
     return processIdentityVerificationStep(session, transcript);
   }
 
-  // ─── All other states (+ llm_override): single LLM call ────────────────
+  // â”€â”€â”€ All other states (+ llm_override): single LLM call â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const clinicName = await getClinicName(session.clinicId);
   const preprocessed = preprocessSpelledLetters(transcript);
   const ctx: LLMCallContext = {
@@ -918,12 +927,12 @@ async function processState(
 
   const llmResult = await callLLM(ctx, preprocessed, clinicName, session.conversationHistory, onResponseTextReady);
 
-  // LLM failure fallback — re-prompt without changing state
+  // LLM failure fallback â€” re-prompt without changing state
   if (!llmResult) {
     console.warn(JSON.stringify({
       level: 'warn',
       service: 'conversationManager',
-      message: 'callLLM returned null — using re-prompt fallback',
+      message: 'callLLM returned null â€” using re-prompt fallback',
       sessionId: session.sessionId,
     }));
     return {
@@ -948,7 +957,7 @@ async function processState(
     : session.state;
   let responseText = response_text;
 
-  // ── 1. Update session with extracted entities (never overwrite confirmed data) ──
+  // â”€â”€ 1. Update session with extracted entities (never overwrite confirmed data) â”€â”€
   if (e.intent && (VALID_INTENTS as string[]).includes(e.intent) && !session.intent) {
     session.intent = e.intent as IntentType;
   }
@@ -975,7 +984,7 @@ async function processState(
     session.nameConfirmed = true;
   }
 
-  // ── 2. Side-effect: patient upsert when identity verification is complete ──
+  // â”€â”€ 2. Side-effect: patient upsert when identity verification is complete â”€â”€
   const hasAllIdentityData =
     session.collectedData.name &&
     session.collectedData.dateOfBirth &&
@@ -1011,7 +1020,7 @@ async function processState(
       }));
       responseText = "I'm having trouble verifying your information. Let me connect you with a staff member.";
       nextState = 'handoff';
-      ttsPromise = null; // discard parallel TTS (wrong audio) — re-synthesize for error message
+      ttsPromise = null; // discard parallel TTS (wrong audio) â€” re-synthesize for error message
     }
   }
 
@@ -1020,7 +1029,7 @@ async function processState(
     nextState = 'identity_verification';
   }
 
-  // ── 3. Side-effect: booking confirmation when caller says yes ─────────────
+  // â”€â”€ 3. Side-effect: booking confirmation when caller says yes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const confirmingBooking =
     !session.bookingConfirmed &&
     session.bookingDate &&
@@ -1039,7 +1048,7 @@ async function processState(
     return { responseText: confirmResult.responseText, nextState: 'completed', shouldAutoHangUp: true, parallelTtsResult: confirmResult.ttsResult, llmMs: llmResult.llmMs, ttsWaitMs: 0 };
   }
 
-  // ── 4. Track failed attempts — escalate to handoff after 5 stuck turns ────
+  // â”€â”€ 4. Track failed attempts â€” escalate to handoff after 5 stuck turns â”€â”€â”€â”€
   if (session.state === nextState && transcript.trim() && session.state !== 'completed') {
     const madeProgress = e.name || e.dateOfBirth || e.phone || e.bookingDate || e.bookingTime || e.intent;
     if (!madeProgress && !e.isYes && !e.isNo) {
@@ -1059,7 +1068,7 @@ async function processState(
     }
   }
 
-  // ── 5. Update conversation history (keep last 3 turns = 6 messages) ──────
+  // â”€â”€ 5. Update conversation history (keep last 3 turns = 6 messages) â”€â”€â”€â”€â”€â”€
   // IMPORTANT: store raw_json (not responseText) so the model sees its prior responses
   // were JSON and continues outputting JSON on every subsequent turn.
   session.conversationHistory.push({ role: 'user', content: preprocessed });
@@ -1070,7 +1079,7 @@ async function processState(
 
   const shouldAutoHangUp = (e.isGoodbye || false) && (nextState === 'handoff' || nextState === 'completed');
 
-  // Await parallel TTS (started during LLM streaming — likely already done)
+  // Await parallel TTS (started during LLM streaming â€” likely already done)
   const ttsWaitStart = Date.now();
   const parallelTtsResult: TtsResult | null = ttsPromise ? await ttsPromise : null;
   const ttsWaitMs = ttsPromise ? Date.now() - ttsWaitStart : 0;
@@ -1083,7 +1092,7 @@ async function processState(
 }
 
 // ---------------------------------------------------------------------------
-// Time format helper (AM/PM → 24-h for calendar API)
+// Time format helper (AM/PM â†’ 24-h for calendar API)
 // ---------------------------------------------------------------------------
 
 /** Convert "H:MM AM/PM" (from LLM extraction) to "HH:MM" 24-h. */
@@ -1103,7 +1112,7 @@ export function resolveBookingTime(timeStr: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Date formatter — converts ISO "YYYY-MM-DD" to spoken English "Wednesday, April 9th"
+// Date formatter â€” converts ISO "YYYY-MM-DD" to spoken English "Wednesday, April 9th"
 // ---------------------------------------------------------------------------
 
 function formatDateForSpeech(isoDate: string): string {
@@ -1135,18 +1144,18 @@ async function confirmBooking(
   const clinicId = session.clinicId;
   const rawDate = session.bookingDate!;  // already ISO "YYYY-MM-DD" from LLM
   const rawTime = session.bookingTime!;
-  const isoDate = rawDate;               // no conversion needed — LLM returns ISO directly
+  const isoDate = rawDate;               // no conversion needed â€” LLM returns ISO directly
   const isoTime = resolveBookingTime(rawTime);
   const slot = { date: isoDate, time: isoTime, durationMinutes: 30 };
 
-  // 1. Check slot availability — advisory only (Calendar integration is Phase 2, not yet complete).
+  // 1. Check slot availability â€” advisory only (Calendar integration is Phase 2, not yet complete).
   // If the slot shows as busy, log a warning and proceed; never block a booking due to calendar state.
   const available = await checkSlotAvailable(clinicId, slot);
   if (!available) {
     console.warn(JSON.stringify({
       level: 'warn',
       service: 'conversationManager',
-      message: 'Slot shows as busy in calendar — proceeding with booking (advisory only, Phase 2)',
+      message: 'Slot shows as busy in calendar â€” proceeding with booking (advisory only, Phase 2)',
       clinicId,
       sessionId: session.sessionId,
       isoDate,
@@ -1157,10 +1166,10 @@ async function confirmBooking(
   session.bookingConfirmed = true;
   const resp = STATIC.bookingDone;
 
-  // Start TTS first — DB write runs in parallel below (~200ms savings)
+  // Start TTS first â€” DB write runs in parallel below (~200ms savings)
   const ttsPromise = synthesize({ text: resp, sessionId: session.sessionId, clinicId }).catch(() => null);
 
-  // 2. Create appointment in DB — in parallel with TTS synthesis above
+  // 2. Create appointment in DB â€” in parallel with TTS synthesis above
   if (session.verifiedPatientId) {
     try {
       const appointment = await createAppointment({
@@ -1177,7 +1186,7 @@ async function confirmBooking(
     }
   }
 
-  // 3. Fire-and-forget: calendar event + SMS + form link — none of these block the voice response.
+  // 3. Fire-and-forget: calendar event + SMS + form link â€” none of these block the voice response.
   // Captured in closure so the call can return immediately.
   const _patientId = session.verifiedPatientId;
   const _appointmentId = session.lastAppointmentId;
@@ -1230,7 +1239,7 @@ async function confirmBooking(
 }
 
 // ---------------------------------------------------------------------------
-// Main export — runPipelineTurn
+// Main export â€” runPipelineTurn
 // ---------------------------------------------------------------------------
 
 export async function runPipelineTurn(
@@ -1255,7 +1264,7 @@ export async function runPipelineTurn(
 
   const t1 = Date.now(); // STT complete
 
-  // 3. EMERGENCY CHECK — always first
+  // 3. EMERGENCY CHECK â€” always first
   if (transcript.length > 0 && detectEmergency(transcript)) {
     if (session.callLogId) {
       await updateCallLogStatus(session.callLogId, session.clinicId, 'completed');
@@ -1265,7 +1274,7 @@ export async function runPipelineTurn(
     console.log(JSON.stringify({
       level: 'warn',
       service: 'conversationManager',
-      message: 'Emergency detected — call handed off',
+      message: 'Emergency detected â€” call handed off',
       sessionId,
       clinicId,
     }));
@@ -1274,7 +1283,7 @@ export async function runPipelineTurn(
     try {
       ttsResult = await synthesize({ text: EMERGENCY_RESPONSE, sessionId, clinicId });
     } catch {
-      // TTS failure is non-fatal — text response still returned
+      // TTS failure is non-fatal â€” text response still returned
     }
 
     return {
@@ -1307,7 +1316,7 @@ export async function runPipelineTurn(
   session.turnCount++;
   session.updatedAt = new Date();
 
-  // 6. Log state transition (never log transcript — PHI)
+  // 6. Log state transition (never log transcript â€” PHI)
   console.log(JSON.stringify({
     level: 'info',
     service: 'conversationManager',
@@ -1319,10 +1328,10 @@ export async function runPipelineTurn(
     turnCount: session.turnCount,
   }));
 
-  // 7. Fire-and-forget DB save — don't wait for it, TTS is the bottleneck.
+  // 7. Fire-and-forget DB save â€” don't wait for it, TTS is the bottleneck.
   saveSessionToDB(session).catch(() => undefined);
 
-  // 8. TTS — use parallel result if available (started during LLM stream), else synthesize now
+  // 8. TTS â€” use parallel result if available (started during LLM stream), else synthesize now
   let ttsResult: TtsResult | null = parallelTtsResult;
   if (!ttsResult) {
     ttsResult = await synthesize({ text: responseText, sessionId, clinicId }).catch(() => null);
@@ -1330,7 +1339,7 @@ export async function runPipelineTurn(
 
   const t4 = Date.now(); // TTS complete
 
-  // Latency log — passive measurement, never delays the pipeline
+  // Latency log â€” passive measurement, never delays the pipeline
   console.log(JSON.stringify({
     level: 'info',
     service: 'latency',
@@ -1346,7 +1355,7 @@ export async function runPipelineTurn(
   }));
 
   // 9. Fire-and-forget: persist turn to DB for dashboard debugging.
-  // transcript_text / response_text are PHI — only stored when STORE_TRANSCRIPTS=true.
+  // transcript_text / response_text are PHI â€” only stored when STORE_TRANSCRIPTS=true.
   const logicMs = t3 - t2 - llmMs - ttsWaitMs;
   insertConversationTurn({
     callLogId: session.callLogId,

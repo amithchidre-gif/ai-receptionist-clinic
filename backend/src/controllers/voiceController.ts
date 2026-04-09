@@ -13,7 +13,7 @@ import { getCachedTts } from '../voice/tts/ttsService';
 const playingCalls = new Set<string>();
 const processingCalls = new Set<string>();
 const lastProcessedAt = new Map<string, number>();
-// Silence detection: timer per call — fires if caller stays silent for 45s after TTS ends
+// Silence detection: timer per call â€” fires if caller stays silent for 45s after TTS ends
 const silenceTimers = new Map<string, NodeJS.Timeout>();
 // Track consecutive silence events per call (to detect dead calls)
 const noInputCounts = new Map<string, number>();
@@ -44,7 +44,7 @@ async function telnyxCallAction(callControlId: string, action: string, params: R
 
 /**
  * Build the WebSocket stream URL for Telnyx to connect to.
- * Converts https:// → wss:// and http:// → ws://.
+ * Converts https:// â†’ wss:// and http:// â†’ ws://.
  * Telnyx requires a WSS (secure WebSocket) URL in production.
  */
 function buildStreamUrl(): string {
@@ -124,17 +124,17 @@ async function startStreaming(callControlId: string): Promise<void> {
   const streamUrl = buildStreamUrl();
   await telnyxCallAction(callControlId, 'streaming_start', {
     stream_url: streamUrl,
-    stream_track: 'inbound_track',  // caller audio only — AI TTS is on the outbound track
+    stream_track: 'inbound_track',  // caller audio only â€” AI TTS is on the outbound track
   });
 }
 
 
 /**
  * Save audio buffer to a temp file and trigger Telnyx playback_start via REST API.
- * Telnyx requires a public HTTP URL — it cannot accept base64 data URIs.
+ * Telnyx requires a public HTTP URL â€” it cannot accept base64 data URIs.
  */
 async function playAudioToCall(callControlId: string, audioBuffer: Buffer): Promise<void> {
-  // Use system /tmp/audio — guaranteed writable on all Unix environments (Render, Docker, etc.)
+  // Use system /tmp/audio â€” guaranteed writable on all Unix environments (Render, Docker, etc.)
   // ${process.cwd()}/tmp/audio can be non-writable if the project source dir is read-only.
   const audioDir = '/tmp/audio';
   await fs.mkdir(audioDir, { recursive: true });
@@ -272,11 +272,11 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
       // Cache call metadata to avoid repeated DB lookups in hot-path handlers
       callMetadata.set(callControlId, { clinicId: callLog.clinicId, callLogId: callLog.id });
 
-      // ─── Register Deepgram transcript callback BEFORE starting the stream ────
+      // â”€â”€â”€ Register Deepgram transcript callback BEFORE starting the stream â”€â”€â”€â”€
       // This closure is called by streamingManager whenever Deepgram fires a final
       // transcript for this call. It runs the conversation pipeline and plays TTS.
       registerTranscriptCallback(callControlId, async (transcript: string, confidence: number, isFinal: boolean) => {
-        // Barge-in: any speech (even interim) while AI is playing → stop playback immediately
+        // Barge-in: any speech (even interim) while AI is playing â†’ stop playback immediately
         if (transcript.trim() && playingCalls.has(callControlId)) {
           playingCalls.delete(callControlId);
           clearSilenceTimer(callControlId);
@@ -290,7 +290,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
               isFinal,
             }));
           } catch {
-            // Ignore — playback may have already ended
+            // Ignore â€” playback may have already ended
           }
           // For interim barge-in: play cached ack so caller hears something
           // during TTS synthesis (prevents "call dropped" perception).
@@ -345,7 +345,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
 
           if (result.ttsResult?.audioBuffer) {
             if (bargeInAckActive.has(callControlId)) {
-              // Ack still playing — queue response to play after ack ends
+              // Ack still playing â€” queue response to play after ack ends
               pendingAudioBuffers.set(callControlId, result.ttsResult.audioBuffer);
             } else {
               await playAudioToCall(callControlId, result.ttsResult.audioBuffer);
@@ -377,7 +377,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
         }
       });
 
-      // ─── Run greeting pipeline turn ──────────────────────────────────────────
+      // â”€â”€â”€ Run greeting pipeline turn â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       const input: PipelineTurnInput = {
         sessionId: callControlId,
         clinicId: callLog.clinicId,
@@ -396,7 +396,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
         nextState: result.nextState,
       }));
 
-      // ─── Start Telnyx audio streaming ─────────────────────────────────────────
+      // â”€â”€â”€ Start Telnyx audio streaming â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       // Telnyx will open a WebSocket to /voice/stream and forward caller audio.
       // We do this BEFORE playing TTS so we're ready to listen as soon as it ends.
       // The transcript callback above ignores speech while AI is playing (playingCalls).
@@ -419,7 +419,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
         }));
       }
 
-      // ─── Play greeting audio ──────────────────────────────────────────────────
+      // â”€â”€â”€ Play greeting audio â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (result.ttsResult?.audioBuffer) {
         try {
           await playAudioToCall(callControlId, result.ttsResult.audioBuffer);
@@ -451,7 +451,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
       console.info(JSON.stringify({
         level: 'info',
         service: 'telnyxWebhook',
-        message: 'call.gather.ended (ignored — streaming STT is active)',
+        message: 'call.gather.ended (ignored â€” streaming STT is active)',
         callControlId,
         status: gatherStatus,
         hasTranscript,
@@ -474,7 +474,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
       const isFinal: boolean = payload.transcription_data?.is_final ?? false;
 
       // Barge-in: on ANY transcript while AI audio is playing, stop playback immediately.
-      // This is intentionally aggressive — the caller should always be able to interrupt.
+      // This is intentionally aggressive â€” the caller should always be able to interrupt.
       // For interim transcripts we stop and return; for final transcripts we stop and fall through
       // to pipeline processing so the response still gets generated.
       if (transcript.trim() && playingCalls.has(callControlId)) {
@@ -484,12 +484,12 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
           console.info(JSON.stringify({
             level: 'info',
             service: 'telnyxWebhook',
-            message: 'call.transcription: barge-in — stopped playback',
+            message: 'call.transcription: barge-in â€” stopped playback',
             callControlId,
             isFinal,
           }));
         } catch {
-          // Ignore — playback may have already ended naturally
+          // Ignore â€” playback may have already ended naturally
         }
         // Only return for interim (partial) transcripts; let final transcripts proceed to pipeline.
         if (!isFinal) return;
@@ -506,7 +506,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
         console.info(JSON.stringify({
           level: 'info',
           service: 'telnyxWebhook',
-          message: 'call.transcription: skipped — pipeline turn already in-flight',
+          message: 'call.transcription: skipped â€” pipeline turn already in-flight',
           callControlId,
         }));
         return;
@@ -519,7 +519,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
         console.info(JSON.stringify({
           level: 'info',
           service: 'telnyxWebhook',
-          message: 'call.transcription: skipped — within 200ms cooldown',
+          message: 'call.transcription: skipped â€” within 200ms cooldown',
           callControlId,
         }));
         return;
@@ -612,22 +612,34 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
       console.info(JSON.stringify({
         level: 'info',
         service: 'telnyxWebhook',
-        message: 'call.playback.ended — listening for caller speech via Deepgram streaming',
+        message: 'call.playback.ended â€” listening for caller speech via Deepgram streaming',
         callControlId,
       }));
       // If barge-in ack just finished, serve any queued pipeline response immediately.
       if (bargeInAckActive.has(callControlId)) {
-        bargeInAckActive.delete(callControlId);
         const pending = pendingAudioBuffers.get(callControlId);
         if (pending) {
+          bargeInAckActive.delete(callControlId);
           pendingAudioBuffers.delete(callControlId);
           playingCalls.add(callControlId);
           playAudioToCall(callControlId, pending).catch(() => {});
           return;
         }
+        // No pending yet - pipeline may still be running (e.g. TTS rate-limited)
+        if (processingCalls.has(callControlId)) {
+          // Re-play hold phrase; keep bargeInAckActive set until pending arrives
+          const holdAck = getCachedTts('One moment please.');
+          if (holdAck) {
+            playingCalls.add(callControlId);
+            playAudioToCall(callControlId, holdAck).catch(() => {});
+            return;
+          }
+        }
+        // Pipeline done, no pending - clear flag, fall through to silence timer
+        bargeInAckActive.delete(callControlId);
       }
       // With streaming STT, no gather command needed.
-      // Deepgram is already receiving audio — it will fire a transcript when the caller speaks.
+      // Deepgram is already receiving audio â€” it will fire a transcript when the caller speaks.
       // Start a 45-second inactivity timer so silent/abandoned calls are handled gracefully.
       if (!processingCalls.has(callControlId)) {
         startSilenceTimer(callControlId);
@@ -670,7 +682,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
       console.info(JSON.stringify({
         level: 'info',
         service: 'telnyxWebhook',
-        message: 'streaming.started — Telnyx forwarding caller audio to /voice/stream',
+        message: 'streaming.started â€” Telnyx forwarding caller audio to /voice/stream',
         callControlId,
       }));
 
