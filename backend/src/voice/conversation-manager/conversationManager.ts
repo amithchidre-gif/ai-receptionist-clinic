@@ -803,8 +803,21 @@ async function processState(
     const detectedIntent = detectIntentKeyword(preprocessedForIntent);
     if (detectedIntent) {
       session.intent = detectedIntent;
-      session.verificationStep = 'await_first_name';
       session.nameConfirmAttempts = 0;
+      // Also try to extract a name if the caller said it in the same breath
+      // (only use the named-phrase pattern — bare words like "book" would false-match)
+      const namedMatch = preprocessedForIntent.match(
+        /(?:my name is|i am|i'm|this is|name's|it's)s+([A-Za-z]+(?:s+[A-Za-z]+)*)/i
+      );
+      if (namedMatch) {
+        const raw = namedMatch[1].trim().split(/s+/)[0];
+        const firstName = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+        session.firstNameRaw = firstName;
+        session.collectedData.name = firstName;
+        session.verificationStep = 'confirm_first_name';
+        return { responseText: buildSpellingConfirm(firstName), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      }
+      session.verificationStep = 'await_first_name';
       return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
     // Unclear intent → fall through to LLM

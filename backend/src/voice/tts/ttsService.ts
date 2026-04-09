@@ -208,6 +208,10 @@ export async function warmTtsCache(): Promise<void> {
 }
 
 
+export function getCachedTts(text: string): Buffer | null {
+  return TTS_CACHE.get(ttsCacheKey(text)) ?? null;
+}
+
 export async function warmClinicGreeting(clinicName: string): Promise<void> {
   const apiKey = config.speechmaticsApiKey;
   if (!apiKey) return;

@@ -7,6 +7,7 @@ import { createCallLog, getCallLogByControlId, updateCallLogComplete, updateCall
 import { getClinicIdByPhoneNumber } from '../models/settingsModel';
 import { sendSuccess, sendError } from '../middleware/responseHelpers';
 import { registerTranscriptCallback, closeDeepgramSession } from '../services/streamingManager';
+import { getCachedTts } from '../voice/tts/ttsService';
 
 // Per-call state tracking (module-level, in-memory)
 const playingCalls = new Set<string>();
@@ -18,6 +19,10 @@ const silenceTimers = new Map<string, NodeJS.Timeout>();
 const noInputCounts = new Map<string, number>();
 // Cache clinicId + callLogId per call to avoid extra DB calls in hot-path handlers
 const callMetadata = new Map<string, { clinicId: string; callLogId: string }>();
+// Barge-in ack tracking: play "One moment please." after barge-in
+// to fill TTS synthesis silence and prevent "call dropped" perception.
+const bargeInAckActive = new Set<string>();
+const pendingAudioBuffers = new Map<string, Buffer>();
 
 /**
  * Call a Telnyx Call Control action directly via REST API.
@@ -287,8 +292,17 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
           } catch {
             // Ignore — playback may have already ended
           }
-          // For interim barge-in: stop speaking but wait for the final transcript to run the pipeline
-          if (!isFinal) return;
+          // For interim barge-in: play cached ack so caller hears something
+          // during TTS synthesis (prevents "call dropped" perception).
+          if (!isFinal) {
+            const ack = getCachedTts('One moment please.');
+            if (ack && !bargeInAckActive.has(callControlId)) {
+              bargeInAckActive.add(callControlId);
+              playingCalls.add(callControlId);
+              playAudioToCall(callControlId, ack).catch(() => {});
+            }
+            return;
+          }
         }
 
         // Only run the pipeline on final (complete) transcripts
@@ -330,7 +344,12 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
           }));
 
           if (result.ttsResult?.audioBuffer) {
-            await playAudioToCall(callControlId, result.ttsResult.audioBuffer);
+            if (bargeInAckActive.has(callControlId)) {
+              // Ack still playing — queue response to play after ack ends
+              pendingAudioBuffers.set(callControlId, result.ttsResult.audioBuffer);
+            } else {
+              await playAudioToCall(callControlId, result.ttsResult.audioBuffer);
+            }
             // Silence timer restarts from call.playback.ended after TTS finishes
             if (result.shouldAutoHangUp) {
               setTimeout(async () => {
@@ -596,6 +615,17 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
         message: 'call.playback.ended — listening for caller speech via Deepgram streaming',
         callControlId,
       }));
+      // If barge-in ack just finished, serve any queued pipeline response immediately.
+      if (bargeInAckActive.has(callControlId)) {
+        bargeInAckActive.delete(callControlId);
+        const pending = pendingAudioBuffers.get(callControlId);
+        if (pending) {
+          pendingAudioBuffers.delete(callControlId);
+          playingCalls.add(callControlId);
+          playAudioToCall(callControlId, pending).catch(() => {});
+          return;
+        }
+      }
       // With streaming STT, no gather command needed.
       // Deepgram is already receiving audio — it will fire a transcript when the caller speaks.
       // Start a 45-second inactivity timer so silent/abandoned calls are handled gracefully.
@@ -612,6 +642,8 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
       lastProcessedAt.delete(callControlId);
       noInputCounts.delete(callControlId);
       callMetadata.delete(callControlId);
+      bargeInAckActive.delete(callControlId);
+      pendingAudioBuffers.delete(callControlId);
 
       const hangupLog = await getCallLogByControlId(callControlId);
       if (hangupLog) {
