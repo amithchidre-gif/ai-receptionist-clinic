@@ -18,7 +18,8 @@ router.get('/:id', (req: Request, res: Response) => {
     return;
   }
 
-  const filePath = path.join(process.cwd(), 'tmp', 'audio', `${id}.wav`);
+  // Must match the write path in voiceController.ts playAudioToCall
+  const filePath = path.join('/tmp', 'audio', `${id}.wav`);
 
   res.setHeader('Content-Type', 'audio/wav');
   res.setHeader('Cache-Control', 'no-cache');

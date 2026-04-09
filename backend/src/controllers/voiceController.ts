@@ -129,7 +129,9 @@ async function startStreaming(callControlId: string): Promise<void> {
  * Telnyx requires a public HTTP URL — it cannot accept base64 data URIs.
  */
 async function playAudioToCall(callControlId: string, audioBuffer: Buffer): Promise<void> {
-  const audioDir = path.join(process.cwd(), 'tmp', 'audio');
+  // Use system /tmp/audio — guaranteed writable on all Unix environments (Render, Docker, etc.)
+  // ${process.cwd()}/tmp/audio can be non-writable if the project source dir is read-only.
+  const audioDir = '/tmp/audio';
   await fs.mkdir(audioDir, { recursive: true });
 
   const audioId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
