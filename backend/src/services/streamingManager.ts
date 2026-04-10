@@ -84,7 +84,8 @@ function _connectDeepgram(callControlId: string, isReconnect: boolean): void {
       const msg = JSON.parse(rawData.toString()) as Record<string, unknown>;
       if ((msg.type as string | undefined) !== 'Results') return;
 
-      const isFinal      = msg.is_final as boolean | undefined;
+      const isFinal     = (msg.is_final     as boolean | undefined) === true;
+      const speechFinal = (msg.speech_final as boolean | undefined) === true;
       const channel      = (msg.channel as Record<string, unknown> | undefined);
       const alternatives = channel?.alternatives as Array<Record<string, unknown>> | undefined;
       const transcript   = (alternatives?.[0]?.transcript as string | undefined) ?? '';
@@ -92,11 +93,25 @@ function _connectDeepgram(callControlId: string, isReconnect: boolean): void {
 
       if (!transcript.trim()) return;
 
-      if (isFinal) {
+      // speech_final=true → endpointing fired, utterance complete → run pipeline.
+      // is_final=true without speech_final → committed mid-utterance chunk → barge-in only.
+      // Without this gate, "A M I T H" fires as "A M I T" + "H" two pipeline turns.
+      const firePipeline = isFinal && speechFinal;
+
+      if (firePipeline) {
         console.info(JSON.stringify({
           level: 'info', service: LOG,
           message: 'Final transcript from Deepgram',
-          callControlId, charCount: transcript.length, confidence,
+          callControlId,
+          charCount: transcript.length,
+          confidence,
+          text: transcript.slice(0, 80),
+        }));
+      } else if (isFinal) {
+        console.debug(JSON.stringify({
+          level: 'debug', service: LOG,
+          message: 'Committed (mid-utterance) transcript from Deepgram',
+          callControlId, charCount: transcript.length,
         }));
       } else {
         console.debug(JSON.stringify({
@@ -107,7 +122,7 @@ function _connectDeepgram(callControlId: string, isReconnect: boolean): void {
       }
 
       const cb = transcriptCallbacks.get(callControlId);
-      if (cb) cb(transcript, isFinal ? confidence : 0.5, isFinal ?? false);
+      if (cb) cb(transcript, firePipeline ? confidence : 0.5, firePipeline);
     } catch {
       // Ignore malformed messages
     }

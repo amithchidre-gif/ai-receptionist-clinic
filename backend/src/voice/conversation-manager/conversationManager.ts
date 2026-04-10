@@ -575,16 +575,27 @@ function detectYesNo(transcript: string): 'yes' | 'no' | null {
 
 /** Detect requests to append a letter: "add H at the end", "missing an H", "H at the end" */
 function detectAppendLetter(text: string): string | null {
+  // "add H", "adding H", "add an H", "add the letter H", "add H at the end"
   let m = text.match(
-    /\badd\s+(?:the\s+(?:letter\s+)?|an?\s+)?([A-Za-z])\b(?:\s+at\s+the\s+end)?/i,
+    /\badd(?:ing)?\s+(?:the\s+(?:letter\s+)?|an?\s+)?([A-Za-z])\b(?:\s+at\s+the\s+end)?/i,
   );
   if (m) return m[1].toUpperCase();
+  // "missing an H", "missing H"
   m = text.match(/\bmissing\s+(?:an?\s+)?([A-Za-z])\b/i);
   if (m) return m[1].toUpperCase();
-  m = text.match(/\b(?:plus|and)\s+([A-Za-z])\b(?:\s+at\s+the\s+end)?/i);
+  // "need an H", "needs H", "it needs an H"
+  m = text.match(/\bneed(?:s)?\s+(?:an?\s+)?([A-Za-z])\b/i);
   if (m) return m[1].toUpperCase();
+  // "there's an H", "there is an H"
+  m = text.match(/\bthere(?:'s|\s+is)\s+(?:an?\s+)?([A-Za-z])\b/i);
+  if (m) return m[1].toUpperCase();
+  // "plus H", "and H", "and an H at the end"
+  m = text.match(/\b(?:plus|and)\s+(?:an?\s+)?([A-Za-z])\b(?:\s+at\s+the\s+end)?/i);
+  if (m) return m[1].toUpperCase();
+  // "H at the end"
   m = text.match(/\b([A-Za-z])\s+at\s+the\s+end\b/i);
   if (m) return m[1].toUpperCase();
+  // "ends with H", "ending in H"
   m = text.match(/\bend(?:s|ing)\s+(?:with|in)\s+([A-Za-z])\b/i);
   if (m) return m[1].toUpperCase();
   return null;
@@ -928,7 +939,27 @@ async function processIdentityVerificationStep(
         session.verificationStep = 'await_first_name';
         return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      // Ambiguous -- re-ask the confirm question
+      // Bare single letter (e.g. Deepgram fires "H" as a split speech_final) — append it
+      if (session.firstNameRaw && /^[A-Za-z]$/.test(preprocessed.trim())) {
+        const rawFN = session.firstNameRaw + preprocessed.trim().toLowerCase();
+        const firstName = rawFN.charAt(0).toUpperCase() + rawFN.slice(1);
+        session.firstNameRaw = firstName;
+        session.collectedData.name = firstName;
+        session.verificationStep = 'confirm_first_name';
+        const { responseText: rtAB, parallelTtsResult: ptAB } = await spellConfirmWithTts(firstName, session);
+        return { responseText: rtAB, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: ptAB, llmMs: 0, ttsWaitMs: 0 };
+      }
+      // User re-spelled their name as a correction (e.g. "A M I T H" when we had "A M I T")
+      const reSpelledFN = extractNameSimple(preprocessed);
+      if (reSpelledFN && reSpelledFN.toLowerCase() !== (session.firstNameRaw ?? '').toLowerCase()) {
+        const firstName = reSpelledFN.split(/\s+/)[0];
+        session.firstNameRaw = firstName;
+        session.collectedData.name = firstName;
+        session.verificationStep = 'confirm_first_name';
+        const { responseText: rtRS, parallelTtsResult: ptRS } = await spellConfirmWithTts(firstName, session);
+        return { responseText: rtRS, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: ptRS, llmMs: 0, ttsWaitMs: 0 };
+      }
+      // Truly ambiguous -- re-ask the confirm question
       session.spellingRetries++;
       const { responseText: rt3, parallelTtsResult: pt3 } = await spellConfirmWithTts(session.firstNameRaw ?? '', session);
       return { responseText: rt3, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: pt3, llmMs: 0, ttsWaitMs: 0 };
@@ -992,9 +1023,27 @@ async function processIdentityVerificationStep(
         session.verificationStep = 'await_last_name';
         return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      // Ambiguous -- re-ask
+      // Bare single letter — append it (handles split speech_final)
+      const curLNAmb = (session.collectedData.name ?? '').trim().split(/\s+/).slice(-1)[0] ?? '';
+      if (curLNAmb && /^[A-Za-z]$/.test(preprocessed.trim())) {
+        const lastName = curLNAmb + preprocessed.trim().toLowerCase();
+        session.collectedData.name = `${session.firstNameRaw ?? ''} ${lastName}`.trim();
+        session.verificationStep = 'confirm_last_name';
+        const { responseText: rtLB, parallelTtsResult: ptLB } = await spellConfirmWithTts(lastName, session);
+        return { responseText: rtLB, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: ptLB, llmMs: 0, ttsWaitMs: 0 };
+      }
+      // User re-spelled (e.g. "C H I D R E" when we had "C H I D R")
+      const reSpelledLN = extractNameSimple(preprocessed);
+      if (reSpelledLN && reSpelledLN.toLowerCase() !== curLNAmb.toLowerCase()) {
+        const lastName = reSpelledLN.split(/\s+/).slice(-1)[0];
+        session.collectedData.name = `${session.firstNameRaw ?? ''} ${lastName}`.trim();
+        session.verificationStep = 'confirm_last_name';
+        const { responseText: rtRSL, parallelTtsResult: ptRSL } = await spellConfirmWithTts(lastName, session);
+        return { responseText: rtRSL, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: ptRSL, llmMs: 0, ttsWaitMs: 0 };
+      }
+      // Truly ambiguous -- re-ask
       session.spellingRetries++;
-      const lastN = (session.collectedData.name ?? '').trim().split(/\s+/).slice(-1)[0] ?? '';
+      const lastN = curLNAmb;
       const { responseText: rt4, parallelTtsResult: pt4 } = await spellConfirmWithTts(lastN, session);
       return { responseText: rt4, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: pt4, llmMs: 0, ttsWaitMs: 0 };
     }
