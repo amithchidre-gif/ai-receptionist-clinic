@@ -581,8 +581,9 @@ function extractNameSimple(preprocessed: string): string | null {
 
 /** "Amit" â†’ "Is that A-M-I-T, Amit?" */
 function buildSpellingConfirm(name: string): string {
-  const spelled = name.toUpperCase().split('').join('-');
-  return `Is that ${spelled}, ${name}?`;
+  // Comma-separated letters force TTS to pause per letter
+  const spelled = name.toUpperCase().split('').join(', ');
+  return `Is that ${spelled}. ${name}?`;
 }
 
 /** "03/30/1985" â†’ "March 30th 1985, correct?" */
@@ -750,6 +751,18 @@ async function processIdentityVerificationStep(
         return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       if (yn === 'no') {
+        // Try inline correction: "No, Amith" or "No, actually Amy"
+        const noStrippedFN = preprocessed.replace(/^\s*(?:no|nope|nah|wrong|incorrect|not right)[,\.\s]+/i, '').trim();
+        if (noStrippedFN) {
+          const correctedFN = extractNameSimple(noStrippedFN);
+          if (correctedFN) {
+            const firstName = correctedFN.split(/\s+/)[0];
+            session.firstNameRaw = firstName;
+            session.collectedData.name = firstName;
+            session.verificationStep = 'confirm_first_name';
+            return { responseText: buildSpellingConfirm(firstName), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+          }
+        }
         session.firstNameRaw = null;
         session.collectedData.name = undefined;
         session.verificationStep = 'await_first_name';
@@ -779,6 +792,17 @@ async function processIdentityVerificationStep(
         return { responseText: STATIC.dobAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       if (yn === 'no') {
+        // Try inline correction: "No, Chidre" or "No, it's C-H-I-D-R-E"
+        const noStrippedLN = preprocessed.replace(/^\s*(?:no|nope|nah|wrong|incorrect|not right)[,\.\s]+/i, '').trim();
+        if (noStrippedLN) {
+          const correctedLN = extractNameSimple(noStrippedLN);
+          if (correctedLN) {
+            const lastName = correctedLN.split(/\s+/).slice(-1)[0];
+            session.collectedData.name = `${session.firstNameRaw ?? ''} ${lastName}`.trim();
+            session.verificationStep = 'confirm_last_name';
+            return { responseText: buildSpellingConfirm(lastName), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+          }
+        }
         const parts2 = (session.collectedData.name ?? '').trim().split(/\s+/);
         session.collectedData.name = parts2[0] ?? '';
         session.verificationStep = 'await_last_name';
@@ -861,6 +885,11 @@ async function processState(
   session: ConversationSession,
   transcript: string
 ): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number; ttsWaitMs: number }> {
+  // Fast-exit: booking confirmed — any subsequent speech just gets a goodbye
+  if (session.bookingConfirmed) {
+    return { responseText: 'Thank you for calling. Goodbye!', nextState: 'completed', shouldAutoHangUp: true, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+  }
+
   // â”€â”€â”€ Greeting (hardcoded â€” no user input to process yet) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (session.state === 'greeting') {
     const clinicNameG = await getClinicName(session.clinicId);
@@ -922,7 +951,7 @@ async function processState(
   // Start TTS as soon as response_text is complete in the stream (parallel execution)
   let ttsPromise: Promise<TtsResult | null> | null = null;
   const onResponseTextReady = (text: string): void => {
-    ttsPromise = synthesize({ text, sessionId: session.sessionId, clinicId: session.clinicId }).catch(() => null);
+    ttsPromise = synthesize({ text: formatTimeForSpeech(text), sessionId: session.sessionId, clinicId: session.clinicId }).catch(() => null);
   };
 
   const llmResult = await callLLM(ctx, preprocessed, clinicName, session.conversationHistory, onResponseTextReady);
@@ -1094,6 +1123,15 @@ async function processState(
 // ---------------------------------------------------------------------------
 // Time format helper (AM/PM â†’ 24-h for calendar API)
 // ---------------------------------------------------------------------------
+
+/** Replace AM/PM with spaced letters so TTS clearly enunciates each (e.g. "10 a m" not "10am"). */
+function formatTimeForSpeech(text: string): string {
+  return text
+    .replace(/(\d{1,2}:\d{2})\s*[Aa][Mm]\b/g, '$1 a m')
+    .replace(/(\d{1,2})\s*[Aa][Mm]\b/g, '$1 a m')
+    .replace(/(\d{1,2}:\d{2})\s*[Pp][Mm]\b/g, '$1 p m')
+    .replace(/(\d{1,2})\s*[Pp][Mm]\b/g, '$1 p m');
+}
 
 /** Convert "H:MM AM/PM" (from LLM extraction) to "HH:MM" 24-h. */
 export function resolveBookingTime(timeStr: string): string {
@@ -1334,7 +1372,7 @@ export async function runPipelineTurn(
   // 8. TTS â€” use parallel result if available (started during LLM stream), else synthesize now
   let ttsResult: TtsResult | null = parallelTtsResult;
   if (!ttsResult) {
-    ttsResult = await synthesize({ text: responseText, sessionId, clinicId }).catch(() => null);
+    ttsResult = await synthesize({ text: formatTimeForSpeech(responseText), sessionId, clinicId }).catch(() => null);
   }
 
   const t4 = Date.now(); // TTS complete
