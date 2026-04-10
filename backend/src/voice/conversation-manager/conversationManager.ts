@@ -600,7 +600,7 @@ function detectRemoveLastLetter(text: string): boolean {
 
 function extractNameSimple(preprocessed: string): string | null {
   const named = preprocessed.match(
-    /(?:my name is|i am|i'm|this is|name's|last name is|last name's|it's)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
+    /(?:my first name is|my last name is|my first name's|my last name's|first name is|last name is|first name's|last name's|my name is|my name's|i'm called|i am called|this is|i am|i'm|name's|it is|it's|called)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
   );
   if (named) {
     return named[1].trim().split(/\s+/)

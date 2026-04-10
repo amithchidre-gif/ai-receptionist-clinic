@@ -376,11 +376,18 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
 
           if (result.ttsResult?.audioBuffer) {
             if (bargeInAckActive.has(callControlId)) {
-              // Ack still playing â€” queue response to play after ack ends
-              pendingAudioBuffers.set(callControlId, result.ttsResult.audioBuffer);
-            } else {
-              await playAudioToCall(callControlId, result.ttsResult.audioBuffer);
+              // Result is ready -- stop the ack immediately so the caller hears the response
+              // without delay. Queuing as pending caused "One moment please. [question]" which
+              // sounded like the question was being asked twice, and also caused Deepgram to
+              // pick up the ack audio via acoustic echo, creating a transcript feedback loop.
+              bargeInAckActive.delete(callControlId);
+              pendingAudioBuffers.delete(callControlId);
+              if (playingCalls.has(callControlId)) {
+                playingCalls.delete(callControlId);
+                try { await telnyxCallAction(callControlId, 'playback_stop'); } catch { /* already ended */ }
+              }
             }
+            await playAudioToCall(callControlId, result.ttsResult.audioBuffer);
             // Silence timer restarts from call.playback.ended after TTS finishes
             if (result.shouldAutoHangUp) {
               setTimeout(async () => {
