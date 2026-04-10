@@ -202,6 +202,36 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
     const payload = req.body?.data?.payload ?? {};
     const callControlId: string = payload.call_control_id ?? '';
 
+    // ---- Inbound SMS (message.received) ----
+    if (eventType === 'message.received') {
+      const fromPhone: string = payload.from?.phone_number ?? payload.from ?? '';
+      const toPhone: string = payload.to?.[0]?.phone_number ?? payload.to ?? '';
+      const smsText: string = (payload.text ?? '').trim();
+      if (fromPhone && toPhone && smsText) {
+        try {
+          const clinicId = await getClinicIdByPhoneNumber(toPhone);
+          if (clinicId) {
+            console.info(JSON.stringify({
+              level: 'info',
+              service: 'telnyxWebhook',
+              message: 'SMS reply received (verification_help reply)',
+              clinicId,
+              from: fromPhone,
+              textLength: smsText.length,
+            }));
+          }
+        } catch (smsHandlerErr) {
+          console.warn(JSON.stringify({
+            level: 'warn',
+            service: 'telnyxWebhook',
+            message: 'message.received handler error',
+            error: (smsHandlerErr as Error).message,
+          }));
+        }
+      }
+      return;
+    }
+
     if (!callControlId) {
       console.warn(JSON.stringify({
         level: 'warn',
@@ -330,6 +360,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
             clinicId: callLog.clinicId,
             callLogId: callLog.id,
             transcriptFragment: transcript,
+            callerPhone: callLog.fromNumber ?? undefined,
           });
 
           console.info(JSON.stringify({
@@ -382,6 +413,7 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
         sessionId: callControlId,
         clinicId: callLog.clinicId,
         callLogId: callLog.id,
+        callerPhone: callLog.fromNumber ?? undefined,
       };
 
       const result = await runPipelineTurn(input);

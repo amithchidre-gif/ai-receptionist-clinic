@@ -207,6 +207,30 @@ export async function sendReminderSms(
   }
 }
 
+export async function sendVerificationHelpSms(
+  clinicId: string,
+  callerPhone: string,
+): Promise<void> {
+  try {
+    const from = await getClinicFromNumber(clinicId);
+    const text =
+      'Hi! Our voice assistant had trouble capturing your info. ' +
+      'Please reply with your full name and date of birth (e.g., John Smith DOB 03/30/1985) ' +
+      "and we'll get you booked. Reply STOP to opt out.";
+    await sendSms(callerPhone, from, text, clinicId, 'verification_help');
+  } catch (err) {
+    const { detail } = extractErrorDetail(err);
+    console.warn(JSON.stringify({
+      level: 'warn',
+      service: 'smsService',
+      message: 'sendVerificationHelpSms failed',
+      clinicId,
+      error: detail,
+      timestamp: new Date().toISOString(),
+    }));
+  }
+}
+
 export async function sendCancellationSms(
   clinicId: string,
   patientPhone: string,

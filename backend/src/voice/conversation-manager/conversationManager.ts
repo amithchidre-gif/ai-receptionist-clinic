@@ -68,6 +68,8 @@ export interface ConversationSession {
   verificationStep: VerificationStep;  // current sub-step in identity step machine
   firstNameRaw: string | null;         // first name only during step machine collection
   nameConfirmAttempts: number;         // confirmation retry counter
+  callerPhone: string | null;          // inbound caller number for SMS fallback
+  spellingRetries: number;             // total re-ask count across all identity steps
   createdAt: Date;
   updatedAt: Date;
 }
@@ -78,6 +80,7 @@ export interface PipelineTurnInput {
   callLogId?: string | null;
   transcriptFragment?: string;
   audioChunk?: Buffer;
+  callerPhone?: string | null;
 }
 
 export interface PipelineTurnOutput {
@@ -150,6 +153,22 @@ export function preprocessSpelledLetters(text: string): string {
     (_m, letter: string, phonetic: string) =>
       PHONETIC_REVERSE[phonetic.toLowerCase()] ?? letter.toUpperCase(),
   );
+
+  // Step 1b — Bare NATO phonetic word sequences (3+ consecutive) without "as in".
+  // e.g. "Alpha Mike India Tango Hotel" → "Amith"
+  {
+    const knownPhonetics = new Set(Object.keys(PHONETIC_REVERSE));
+    result = result.replace(
+      /\b([A-Za-z]+(?:\s+[A-Za-z]+){2,})\b/g,
+      (match: string) => {
+        const words = match.trim().toLowerCase().split(/\s+/);
+        if (words.length < 3) return match;
+        if (!words.every((w: string) => knownPhonetics.has(w))) return match;
+        const letters = words.map((w: string) => PHONETIC_REVERSE[w]!);
+        return letters[0] + letters.slice(1).map((l: string) => l.toLowerCase()).join('');
+      },
+    );
+  }
 
   // Step 2 â€” Separator-delimited single letters (3+), allowing optional spaces around separator.
   // Handles: "A-M-I-T", "A.M.I.T", "a - m - i - t", "A_M_I_T"
@@ -330,7 +349,8 @@ export function clearSession(sessionId: string): void {
 function getOrCreateSession(
   sessionId: string,
   clinicId: string,
-  callLogId: string | null
+  callLogId: string | null,
+  callerPhone: string | null = null,
 ): ConversationSession {
   const existing = sessions.get(sessionId);
   if (existing) return existing;
@@ -359,6 +379,8 @@ function getOrCreateSession(
     verificationStep: 'await_first_name',
     firstNameRaw: null,
     nameConfirmAttempts: 0,
+    callerPhone,
+    spellingRetries: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -461,6 +483,8 @@ async function saveSessionToDB(session: ConversationSession): Promise<void> {
       verificationStep: session.verificationStep,
       firstNameRaw: session.firstNameRaw,
       nameConfirmAttempts: session.nameConfirmAttempts,
+      callerPhone: session.callerPhone,
+      spellingRetries: session.spellingRetries,
     });
 
     await query(
@@ -544,9 +568,34 @@ function detectIntentKeyword(preprocessed: string): IntentType | null {
 
 function detectYesNo(transcript: string): 'yes' | 'no' | null {
   const t = transcript.toLowerCase();
-  if (/\b(yes|yeah|yep|yup|correct|right|sure|absolutely|that's right|exactly|confirmed|go ahead)\b/.test(t)) return 'yes';
-  if (/\b(no|nope|nah|wrong|incorrect|not right|that's wrong|not quite)\b/.test(t)) return 'no';
+  if (/\b(yes|yeah|yep|yup|correct|right|sure|absolutely|that's right|that's correct|you're right|you are right|exactly|confirmed|go ahead|perfect|spot on|sounds good|sounds right|great|good|affirmative|that's it|that is correct|that is right)\b/.test(t)) return 'yes';
+  if (/\b(no|nope|nah|wrong|incorrect|not right|that's wrong|not quite|not correct|that's not right|that is not right|not exactly)\b/.test(t)) return 'no';
   return null;
+}
+
+/** Detect requests to append a letter: "add H at the end", "missing an H", "H at the end" */
+function detectAppendLetter(text: string): string | null {
+  let m = text.match(
+    /\badd(?:\s+(?:an?\s+|the\s+(?:letter\s+)?))?([A-Za-z])\b(?:\s+at\s+the\s+end)?/i,
+  );
+  if (m) return m[1].toUpperCase();
+  m = text.match(/\bmissing\s+(?:an?\s+)?([A-Za-z])\b/i);
+  if (m) return m[1].toUpperCase();
+  m = text.match(/\b(?:plus|and)\s+([A-Za-z])\b(?:\s+at\s+the\s+end)?/i);
+  if (m) return m[1].toUpperCase();
+  m = text.match(/\b([A-Za-z])\s+at\s+the\s+end\b/i);
+  if (m) return m[1].toUpperCase();
+  m = text.match(/\bend(?:s|ing)\s+(?:with|in)\s+([A-Za-z])\b/i);
+  if (m) return m[1].toUpperCase();
+  return null;
+}
+
+/** Detect requests to remove the last letter */
+function detectRemoveLastLetter(text: string): boolean {
+  return (
+    /\b(?:remove|drop|take\s+off|delete|without|minus)\s+the\s+last\s+(?:letter|character|one)?\b/i.test(text) ||
+    /\bshorten\s+(?:it|the\s+name)\b/i.test(text)
+  );
 }
 
 function extractNameSimple(preprocessed: string): string | null {
@@ -759,17 +808,43 @@ function preprocessDOBText(text: string): string {
 // Falls back to LLM (via processState with llm_override) on unexpected input.
 // ---------------------------------------------------------------------------
 
+async function handleSmsVerificationFallback(
+  session: ConversationSession,
+): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number; ttsWaitMs: number }> {
+  if (session.callerPhone) {
+    import('../../services/smsService').then((smsModule) => {
+      smsModule.sendVerificationHelpSms(session.clinicId, session.callerPhone!).catch(() => {});
+    }).catch(() => {});
+  }
+  return {
+    responseText:
+      "I'm having some trouble capturing your details. I've just sent you a text message — " +
+      "please reply with your full name and date of birth and we'll get you booked. Have a great day!",
+    nextState: 'completed',
+    shouldAutoHangUp: true,
+    parallelTtsResult: null,
+    llmMs: 0,
+    ttsWaitMs: 0,
+  };
+}
+
 async function processIdentityVerificationStep(
   session: ConversationSession,
   transcript: string,
 ): Promise<{ responseText: string; nextState: ConversationState; shouldAutoHangUp: boolean; parallelTtsResult: TtsResult | null; llmMs: number; ttsWaitMs: number }> {
   const preprocessed = preprocessSpelledLetters(transcript);
 
+  // SMS fallback: if caller has been stuck for too many re-asks, send a text and hang up
+  if (session.spellingRetries >= 5) {
+    return handleSmsVerificationFallback(session);
+  }
+
   switch (session.verificationStep) {
     case 'await_first_name': {
       const name = extractNameSimple(preprocessed);
       if (!name) {
         // Re-ask without LLM
+        session.spellingRetries++;
         return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       session.firstNameRaw = name.split(/\s+/)[0]; // first token only
@@ -787,7 +862,26 @@ async function processIdentityVerificationStep(
         return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       if (yn === 'no') {
-        // Try inline correction: "No, Amith" or "No, actually Amy"
+        // 1. Append-letter correction: "add H at the end", "missing an H"
+        if (session.firstNameRaw) {
+          var appendL = detectAppendLetter(preprocessed);
+          if (appendL) {
+            var raw = session.firstNameRaw + appendL.toLowerCase();
+            var firstName = raw.charAt(0).toUpperCase() + raw.slice(1);
+            session.firstNameRaw = firstName;
+            session.collectedData.name = firstName;
+            session.verificationStep = 'confirm_first_name';
+            return { responseText: buildSpellingConfirm(firstName), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+          }
+          if (detectRemoveLastLetter(preprocessed) && session.firstNameRaw.length > 1) {
+            var firstName2 = session.firstNameRaw.slice(0, -1);
+            session.firstNameRaw = firstName2;
+            session.collectedData.name = firstName2;
+            session.verificationStep = 'confirm_first_name';
+            return { responseText: buildSpellingConfirm(firstName2), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+          }
+        }
+        // 2. Try inline correction: "No, Amith" or "No, actually Amy"
         const noStrippedFN = preprocessed.replace(/^\s*(?:no|nope|nah|wrong|incorrect|not right)[,\.\s]+/i, '').trim();
         if (noStrippedFN) {
           const correctedFN = extractNameSimple(noStrippedFN);
@@ -799,18 +893,21 @@ async function processIdentityVerificationStep(
             return { responseText: buildSpellingConfirm(firstName), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
           }
         }
+        session.spellingRetries++;
         session.firstNameRaw = null;
         session.collectedData.name = undefined;
         session.verificationStep = 'await_first_name';
         return { responseText: STATIC.firstNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      // Ambiguous â€” re-ask the confirm question
+      // Ambiguous -- re-ask the confirm question
+      session.spellingRetries++;
       return { responseText: buildSpellingConfirm(session.firstNameRaw ?? ''), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
 
     case 'await_last_name': {
       const name = extractNameSimple(preprocessed);
       if (!name) {
+        session.spellingRetries++;
         return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       const lastName = name.split(/\s+/).slice(-1)[0];
@@ -828,7 +925,24 @@ async function processIdentityVerificationStep(
         return { responseText: STATIC.dobAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       if (yn === 'no') {
-        // Try inline correction: "No, Chidre" or "No, it's C-H-I-D-R-E"
+        // 1. Append-letter / remove-last-letter correction
+        const currentLN = (session.collectedData.name ?? '').trim().split(/\s+/).slice(-1)[0] ?? '';
+        if (currentLN) {
+          const appendL = detectAppendLetter(preprocessed);
+          if (appendL) {
+            const lastName = currentLN + appendL.toLowerCase();
+            session.collectedData.name = `${session.firstNameRaw ?? ''} ${lastName}`.trim();
+            session.verificationStep = 'confirm_last_name';
+            return { responseText: buildSpellingConfirm(lastName), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+          }
+          if (detectRemoveLastLetter(preprocessed) && currentLN.length > 1) {
+            const lastName = currentLN.slice(0, -1);
+            session.collectedData.name = `${session.firstNameRaw ?? ''} ${lastName}`.trim();
+            session.verificationStep = 'confirm_last_name';
+            return { responseText: buildSpellingConfirm(lastName), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+          }
+        }
+        // 2. Try inline correction: "No, Chidre" or "No, it's C-H-I-D-R-E"
         const noStrippedLN = preprocessed.replace(/^\s*(?:no|nope|nah|wrong|incorrect|not right)[,\.\s]+/i, '').trim();
         if (noStrippedLN) {
           const correctedLN = extractNameSimple(noStrippedLN);
@@ -839,12 +953,14 @@ async function processIdentityVerificationStep(
             return { responseText: buildSpellingConfirm(lastName), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
           }
         }
+        session.spellingRetries++;
         const parts2 = (session.collectedData.name ?? '').trim().split(/\s+/);
         session.collectedData.name = parts2[0] ?? '';
         session.verificationStep = 'await_last_name';
         return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
-      // Ambiguous â€” re-ask
+      // Ambiguous -- re-ask
+      session.spellingRetries++;
       const lastN = (session.collectedData.name ?? '').trim().split(/\s+/).slice(-1)[0] ?? '';
       return { responseText: buildSpellingConfirm(lastN), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
     }
@@ -853,6 +969,7 @@ async function processIdentityVerificationStep(
       const dobPreprocessed = preprocessDOBText(transcript);
       const extracted = keywordExtract(dobPreprocessed);
       if (!extracted.dateOfBirth) {
+        session.spellingRetries++;
         return { responseText: STATIC.dobAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       session.collectedData.dateOfBirth = extracted.dateOfBirth;
@@ -1319,10 +1436,12 @@ async function confirmBooking(
 export async function runPipelineTurn(
   input: PipelineTurnInput
 ): Promise<PipelineTurnOutput> {
-  const { sessionId, clinicId, callLogId, transcriptFragment, audioChunk } = input;
+  const { sessionId, clinicId, callLogId, transcriptFragment, audioChunk, callerPhone } = input;
 
   // 1. Get or create session
-  const session = getOrCreateSession(sessionId, clinicId, callLogId ?? null);
+  const session = getOrCreateSession(sessionId, clinicId, callLogId ?? null, callerPhone ?? null);
+  // Persist callerPhone on first turn (subsequent turns may not supply it)
+  if (callerPhone && !session.callerPhone) session.callerPhone = callerPhone;
 
   const t0 = Date.now(); // turn start
 
