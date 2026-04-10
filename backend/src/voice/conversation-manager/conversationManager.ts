@@ -217,9 +217,9 @@ function keywordExtract(transcript: string): LLMExtracted {
   const result: LLMExtracted = { ...LLM_EXTRACTED_DEFAULT };
 
   // Intent detection
-  const hasCancel = /\bcancel\b/.test(t);
-  const hasReschedule = /\b(reschedule|change|move|modify)\b/.test(t) && /\bappointment\b/.test(t);
-  const hasBook = /\b(book|schedule|appointment|make an appointment|need an appointment|set up|set an)\b/.test(t);
+  const hasCancel = /\b(cancel|call off)\b/.test(t);
+  const hasReschedule = /\b(reschedule|change|move|modify|postpone|push back|different day|different time)\b/.test(t) && /\bappointment\b/.test(t);
+  const hasBook = /\b(book|schedule|appointment|make an appointment|need an appointment|set up|set an|see a doctor|see the doctor|new appointment|need to see|want to see|come in)\b/.test(t);
 
   if (hasCancel && !hasReschedule) {
     result.intent = 'cancel_appointment';
@@ -557,9 +557,9 @@ const STATIC = {
 
 function detectIntentKeyword(preprocessed: string): IntentType | null {
   const t = preprocessed.toLowerCase();
-  const hasCancel = /\bcancel\b/.test(t);
-  const hasReschedule = /\b(reschedule|change|move|modify)\b/.test(t);
-  const hasBook = /\b(book|schedule|appointment|make an appointment|need an appointment|set up|set an)\b/.test(t);
+  const hasCancel = /\b(cancel|call off)\b/.test(t);
+  const hasReschedule = /\b(reschedule|change my appointment|move.*appointment|modify|postpone|push back|different day|different time|change the time|change the date)\b/.test(t);
+  const hasBook = /\b(book|schedule|appointment|make an appointment|need an appointment|set up|set an|see a doctor|see the doctor|new appointment|need to see|want to see|come in)\b/.test(t);
   if (hasCancel && !hasReschedule) return 'cancel_appointment';
   if (hasReschedule) return 'reschedule_appointment';
   if (hasBook) return 'book_appointment';
@@ -656,9 +656,22 @@ function extractNameSimple(preprocessed: string): string | null {
 
 /** "Amit" â†’ "Is that A-M-I-T, Amit?" */
 function buildSpellingConfirm(name: string): string {
-  // Comma-separated letters force TTS to pause per letter
-  const spelled = name.toUpperCase().split('').join(', ');
-  return `Is that ${spelled}. ${name}?`;
+  const spelled = spellPhonetic(name);
+  return `Is that ${spelled}, ${name}?`;
+}
+
+/** Build spelling-confirm text AND pre-synthesise TTS -- saves ~1.2s on identity turns */
+async function spellConfirmWithTts(
+  name: string,
+  session: ConversationSession,
+): Promise<{ responseText: string; parallelTtsResult: TtsResult | null }> {
+  const responseText = buildSpellingConfirm(name);
+  const parallelTtsResult = await synthesize({
+    text: responseText,
+    sessionId: session.sessionId,
+    clinicId: session.clinicId,
+  }).catch(() => null);
+  return { responseText, parallelTtsResult };
 }
 
 /** "03/30/1985" â†’ "March 30th 1985, correct?" */
@@ -862,7 +875,8 @@ async function processIdentityVerificationStep(
       session.firstNameRaw = name.split(/\s+/)[0]; // first token only
       session.collectedData.name = session.firstNameRaw;
       session.verificationStep = 'confirm_first_name';
-      return { responseText: buildSpellingConfirm(session.firstNameRaw), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      const { responseText: rt1, parallelTtsResult: pt1 } = await spellConfirmWithTts(session.firstNameRaw, session);
+      return { responseText: rt1, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: pt1, llmMs: 0, ttsWaitMs: 0 };
     }
 
     case 'confirm_first_name': {
@@ -913,7 +927,8 @@ async function processIdentityVerificationStep(
       }
       // Ambiguous -- re-ask the confirm question
       session.spellingRetries++;
-      return { responseText: buildSpellingConfirm(session.firstNameRaw ?? ''), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      const { responseText: rt3, parallelTtsResult: pt3 } = await spellConfirmWithTts(session.firstNameRaw ?? '', session);
+      return { responseText: rt3, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: pt3, llmMs: 0, ttsWaitMs: 0 };
     }
 
     case 'await_last_name': {
@@ -925,7 +940,8 @@ async function processIdentityVerificationStep(
       const lastName = name.split(/\s+/).slice(-1)[0];
       session.collectedData.name = `${session.firstNameRaw ?? ''} ${lastName}`.trim();
       session.verificationStep = 'confirm_last_name';
-      return { responseText: buildSpellingConfirm(lastName), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      const { responseText: rt2, parallelTtsResult: pt2 } = await spellConfirmWithTts(lastName, session);
+      return { responseText: rt2, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: pt2, llmMs: 0, ttsWaitMs: 0 };
     }
 
     case 'confirm_last_name': {
@@ -974,7 +990,8 @@ async function processIdentityVerificationStep(
       // Ambiguous -- re-ask
       session.spellingRetries++;
       const lastN = (session.collectedData.name ?? '').trim().split(/\s+/).slice(-1)[0] ?? '';
-      return { responseText: buildSpellingConfirm(lastN), nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      const { responseText: rt4, parallelTtsResult: pt4 } = await spellConfirmWithTts(lastN, session);
+      return { responseText: rt4, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: pt4, llmMs: 0, ttsWaitMs: 0 };
     }
 
     case 'await_dob': {
@@ -1058,7 +1075,7 @@ async function processState(
   // â”€â”€â”€ Greeting (hardcoded â€” no user input to process yet) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (session.state === 'greeting') {
     const clinicNameG = await getClinicName(session.clinicId);
-    const greetingText = `Welcome to ${clinicNameG}! To book, reschedule, or cancel an appointment, just say which one.`;
+    const greetingText = `Hi, thanks for calling ${clinicNameG}! Would you like to book, reschedule, or cancel an appointment?`;
     return { responseText: greetingText, nextState: 'intent_detection', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
   }
 
@@ -1072,7 +1089,7 @@ async function processState(
       // Also try to extract a name if the caller said it in the same breath
       // (only use the named-phrase pattern â€” bare words like "book" would false-match)
       const namedMatch = preprocessedForIntent.match(
-        /(?:my name is|i am|i'm|this is|name's|it's)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
+        /(?:my name is|my first name is|i am|i'm|this is|name's|it's|name is|called|booking for|appointment for|calling for|it is|i go by)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i
       );
       if (namedMatch) {
         const raw = namedMatch[1].trim().split(/\s+/)[0];

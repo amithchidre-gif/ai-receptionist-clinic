@@ -72,7 +72,7 @@ export function initDeepgramSession(callControlId: string): void {
     sample_rate: '8000',
     channels: '1',
     interim_results: 'true',     // Enable interim results for lower perceived latency
-    endpointing: '150',          // Reduced from 300ms → fires final transcript 150ms sooner per turn
+    endpointing: '200',          // 200ms silence -> fewer mid-sentence cut-offs while staying responsive
     utterance_end_ms: '1000',   // Deepgram minimum is 1000ms — do not go below
     smart_format: 'true',
   });
