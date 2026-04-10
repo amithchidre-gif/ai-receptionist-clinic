@@ -561,20 +561,34 @@ function extractNameSimple(preprocessed: string): string | null {
   // Strip trailing Deepgram smart_format punctuation (e.g. "Amith.")
   const cleaned = preprocessed.replace(/[.,!?;:]+$/, '').trim();
   // Bare name: 1â€“3 words, any capitalisation (Deepgram varies)
+  const STOP_WORDS = new Set([
+    'you','your','yes','yeah','yep','no','nope','nah',
+    'ok','okay','sure','hi','hello','hey','bye','goodbye',
+    'thanks','thank','please','sorry','what','when','where',
+    'the','a','an','and','or','but','for','with','from',
+    'my','me','i','we','he','she','they','it','this','that',
+  ]);
   const bare = cleaned.match(/^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})$/);
   if (bare) {
-    const STOP_WORDS = new Set([
-      'you','your','yes','yeah','yep','no','nope','nah',
-      'ok','okay','sure','hi','hello','hey','bye','goodbye',
-      'thanks','thank','please','sorry','what','when','where',
-      'the','a','an','and','or','but','for','with','from',
-      'my','me','i','we','he','she','they','it','this','that',
-    ]);
     const words = bare[1].trim().toLowerCase().split(/\s+/);
     if (words.every((w: string) => STOP_WORDS.has(w))) return null;
     return bare[1].trim().split(/\s+/)
       .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
       .join(' ');
+  }
+  // Fallback: strip internal commas and retry.
+  // Handles "Chidre, Chidre" from "Chidre C-H-I-D-R-E" where Deepgram adds a comma.
+  const noComma = cleaned.replace(/,\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  if (noComma !== cleaned) {
+    const bare2 = noComma.match(/^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})$/);
+    if (bare2) {
+      const words2 = bare2[1].trim().toLowerCase().split(/\s+/);
+      if (!words2.every((w: string) => STOP_WORDS.has(w))) {
+        return bare2[1].trim().split(/\s+/)
+          .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+          .join(' ');
+      }
+    }
   }
   return null;
 }
@@ -715,6 +729,28 @@ function preprocessDOBText(text: string): string {
       return String(2000 + (AL[p] || 0));
     },
   );
+
+  // Cardinal day-number words → digits (handles "thirty March" when caller uses cardinal).
+  // Year-words like "eighty" are already gone after year conversion above.
+  // Process compound forms first (twenty-eight before twenty).
+  const CARDINAL_DAY_MAP: [RegExp, string][] = [
+    [/\bthirty[- ]?one\b/gi, '31'], [/\btwenty[- ]?nine\b/gi, '29'],
+    [/\btwenty[- ]?eight\b/gi, '28'], [/\btwenty[- ]?seven\b/gi, '27'],
+    [/\btwenty[- ]?six\b/gi, '26'], [/\btwenty[- ]?five\b/gi, '25'],
+    [/\btwenty[- ]?four\b/gi, '24'], [/\btwenty[- ]?three\b/gi, '23'],
+    [/\btwenty[- ]?two\b/gi, '22'], [/\btwenty[- ]?one\b/gi, '21'],
+    [/\bthirty\b/gi, '30'], [/\btwenty\b/gi, '20'],
+    [/\beighteen\b/gi, '18'], [/\bseventeen\b/gi, '17'],
+    [/\bsixteen\b/gi, '16'], [/\bfifteen\b/gi, '15'],
+    [/\bfourteen\b/gi, '14'], [/\bthirteen\b/gi, '13'],
+    [/\btwelve\b/gi, '12'], [/\beleven\b/gi, '11'], [/\bten\b/gi, '10'],
+    [/\bnine\b/gi, '9'], [/\beight\b/gi, '8'], [/\bseven\b/gi, '7'],
+    [/\bsix\b/gi, '6'], [/\bfive\b/gi, '5'], [/\bfour\b/gi, '4'],
+    [/\bthree\b/gi, '3'], [/\btwo\b/gi, '2'], [/\bone\b/gi, '1'],
+  ];
+  for (const [re, digit] of CARDINAL_DAY_MAP) {
+    t = t.replace(re, digit);
+  }
   return t;
 }
 
