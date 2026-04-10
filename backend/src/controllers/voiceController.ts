@@ -322,17 +322,11 @@ export async function telnyxWebhook(req: Request, res: Response): Promise<void> 
           } catch {
             // Ignore â€” playback may have already ended
           }
-          // For interim barge-in: play cached ack so caller hears something
-          // during TTS synthesis (prevents "call dropped" perception).
-          if (!isFinal) {
-            const ack = getCachedTts('One moment please.');
-            if (ack && !bargeInAckActive.has(callControlId)) {
-              bargeInAckActive.add(callControlId);
-              playingCalls.add(callControlId);
-              playAudioToCall(callControlId, ack).catch(() => {});
-            }
-            return;
-          }
+          // For interim barge-in: just return silently and wait for Deepgram's final transcript.
+          // Do NOT play any audio here - playing ack audio echoes onto the inbound track,
+          // causing Deepgram to miss the caller's final transcript entirely, creating a
+          // permanent 20-45 second silence loop that the caller cannot escape.
+          if (!isFinal) return;
         }
 
         // Only run the pipeline on final (complete) transcripts

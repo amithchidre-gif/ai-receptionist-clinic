@@ -76,13 +76,7 @@ export async function transcribeAudioBuffer(
 }
 
 export function ingestTranscriptText(sessionId: string, text: string): SttResult {
-  // Never log the text itself — PHI
-  console.log(JSON.stringify({
-    level: 'info',
-    event: 'stt_text_ingested',
-    sessionId,
-    charCount: text.length,
-  }));
-
+  // Intentionally no logging here -- voiceController already logs stt_text_ingested
+  // with confidence. A duplicate log here caused every transcript to appear twice in logs.
   return { text, confidence: 1.0, sessionId };
 }

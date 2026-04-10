@@ -616,6 +616,18 @@ function extractNameSimple(preprocessed: string): string | null {
     'thanks','thank','please','sorry','what','when','where',
     'the','a','an','and','or','but','for','with','from',
     'my','me','i','we','he','she','they','it','this','that',
+    // Verbs / auxiliaries
+    'are','is','am','was','were','be','been','being',
+    'do','does','did','done','have','has','had',
+    'will','would','could','should','may','might','shall','can',
+    // Adverbs / question words / fillers
+    'there','here','now','then','so','how','who','which','if','as',
+    'not','just','still','also','too','very','much','all','any','some',
+    'up','out','off','at','by','on','in','to','of','into','about','after',
+    // Pronouns
+    'him','his','her','its','their','our','them','us',
+    // Filler sounds
+    'um','uh','hmm','hm','err','ah','oh',
   ]);
   const bare = cleaned.match(/^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})$/);
   if (bare) {
