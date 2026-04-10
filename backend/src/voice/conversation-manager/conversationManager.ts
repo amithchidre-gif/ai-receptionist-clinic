@@ -576,7 +576,7 @@ function detectYesNo(transcript: string): 'yes' | 'no' | null {
 /** Detect requests to append a letter: "add H at the end", "missing an H", "H at the end" */
 function detectAppendLetter(text: string): string | null {
   let m = text.match(
-    /\badd(?:\s+(?:an?\s+|the\s+(?:letter\s+)?))?([A-Za-z])\b(?:\s+at\s+the\s+end)?/i,
+    /\badd\s+(?:the\s+(?:letter\s+)?|an?\s+)?([A-Za-z])\b(?:\s+at\s+the\s+end)?/i,
   );
   if (m) return m[1].toUpperCase();
   m = text.match(/\bmissing\s+(?:an?\s+)?([A-Za-z])\b/i);
@@ -656,8 +656,8 @@ function extractNameSimple(preprocessed: string): string | null {
 
 /** "Amit" → "Is that A-M-I-T-H, Amith?" — compact dash format for fast TTS synthesis */
 function buildSpellingConfirm(name: string): string {
-  const dashed = name.toUpperCase().split('').filter((c: string) => /[A-Z]/.test(c)).join('-');
-  return `Is that ${dashed}, ${name}?`;
+  const letters = name.toUpperCase().split('').filter((c: string) => /[A-Z]/.test(c)).join(', ');
+  return `Is that ${letters}? As in ${name}?`;
 }
 
 /** Build spelling-confirm text AND pre-synthesise TTS -- saves ~1.2s on identity turns */
@@ -910,11 +910,11 @@ async function processIdentityVerificationStep(
       }
       if (yn === 'no') {
         // Try inline correction: "No, Amith" or "No, actually Amy"
-        const noStrippedFN = preprocessed.replace(/^s*(?:no|nope|nah|wrong|incorrect|not right)[,.s]+/i, '').trim();
+        const noStrippedFN = preprocessed.replace(/^\s*(?:no|nope|nah|wrong|incorrect|not right)[,.\s]+/i, '').trim();
         if (noStrippedFN) {
           const correctedFN = extractNameSimple(noStrippedFN);
           if (correctedFN) {
-            const firstName = correctedFN.split(/s+/)[0];
+            const firstName = correctedFN.split(/\s+/)[0];
             session.firstNameRaw = firstName;
             session.collectedData.name = firstName;
             session.verificationStep = 'confirm_first_name';
@@ -933,9 +933,22 @@ async function processIdentityVerificationStep(
       const { responseText: rt3, parallelTtsResult: pt3 } = await spellConfirmWithTts(session.firstNameRaw ?? '', session);
       return { responseText: rt3, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: pt3, llmMs: 0, ttsWaitMs: 0 };
     }
+    case 'await_last_name': {
+      const lname = extractNameSimple(preprocessed);
+      if (!lname) {
+        session.spellingRetries++;
+        return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
+      }
+      const lastName = lname.split(/\s+/).slice(-1)[0];
+      session.collectedData.name = `${session.firstNameRaw ?? ''} ${lastName}`.trim();
+      session.verificationStep = 'confirm_last_name';
+      const { responseText: rt2, parallelTtsResult: pt2 } = await spellConfirmWithTts(lastName, session);
+      return { responseText: rt2, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: pt2, llmMs: 0, ttsWaitMs: 0 };
+    }
+
     case 'confirm_last_name': {
       // Check corrections FIRST — works whether user says "no, add E" or just "add E at the end"
-      const currentLN = (session.collectedData.name ?? '').trim().split(/s+/).slice(-1)[0] ?? '';
+      const currentLN = (session.collectedData.name ?? '').trim().split(/\s+/).slice(-1)[0] ?? '';
       if (currentLN) {
         const appendLLN = detectAppendLetter(preprocessed);
         if (appendLLN) {
@@ -962,11 +975,11 @@ async function processIdentityVerificationStep(
       }
       if (yn === 'no') {
         // Try inline correction: "No, Chidre" or "No, it's C-H-I-D-R-E"
-        const noStrippedLN = preprocessed.replace(/^s*(?:no|nope|nah|wrong|incorrect|not right)[,.s]+/i, '').trim();
+        const noStrippedLN = preprocessed.replace(/^\s*(?:no|nope|nah|wrong|incorrect|not right)[,.\s]+/i, '').trim();
         if (noStrippedLN) {
           const correctedLN = extractNameSimple(noStrippedLN);
           if (correctedLN) {
-            const lastName = correctedLN.split(/s+/).slice(-1)[0];
+            const lastName = correctedLN.split(/\s+/).slice(-1)[0];
             session.collectedData.name = `${session.firstNameRaw ?? ''} ${lastName}`.trim();
             session.verificationStep = 'confirm_last_name';
             const { responseText: rtF, parallelTtsResult: ptF } = await spellConfirmWithTts(lastName, session);
@@ -974,14 +987,14 @@ async function processIdentityVerificationStep(
           }
         }
         session.spellingRetries++;
-        const parts2 = (session.collectedData.name ?? '').trim().split(/s+/);
+        const parts2 = (session.collectedData.name ?? '').trim().split(/\s+/);
         session.collectedData.name = parts2[0] ?? '';
         session.verificationStep = 'await_last_name';
         return { responseText: STATIC.lastNameAsk, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: null, llmMs: 0, ttsWaitMs: 0 };
       }
       // Ambiguous -- re-ask
       session.spellingRetries++;
-      const lastN = (session.collectedData.name ?? '').trim().split(/s+/).slice(-1)[0] ?? '';
+      const lastN = (session.collectedData.name ?? '').trim().split(/\s+/).slice(-1)[0] ?? '';
       const { responseText: rt4, parallelTtsResult: pt4 } = await spellConfirmWithTts(lastN, session);
       return { responseText: rt4, nextState: 'identity_verification', shouldAutoHangUp: false, parallelTtsResult: pt4, llmMs: 0, ttsWaitMs: 0 };
     }
